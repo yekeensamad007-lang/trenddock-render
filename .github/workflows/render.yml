@@ -1,0 +1,23 @@
+name: Render Pool
+on:
+  repository_dispatch:
+    types: [render_pool]
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDINARY_CLOUD_NAME: dnzxeped5
+      CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+      CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+      - run: pip install -r requirements.txt
+      - name: Save incoming payload
+        run: echo '${{ toJSON(github.event.client_payload) }}' > decision.json
+      - run: python render.py
