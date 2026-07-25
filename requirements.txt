@@ -1,0 +1,4 @@
+requests
+cloudinary
+yt-dlp
+openai-whisper
