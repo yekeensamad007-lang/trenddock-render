@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import tempfile
+import textwrap
 import requests
 from datetime import datetime
 import cloudinary
@@ -417,7 +418,74 @@ def download_video(video_url: str, video_id: str):
     print(f"Downloaded: {output_path}")
     return output_path
 
+def brand_main_video(
+    input_path: str,
+    video_id: str,
+    author: str,
+    srt_path: str | None = None
+) -> str | None:
+    output_path = os.path.join(OUTPUT_DIR, f"{video_id}_branded.mp4")
+    if os.path.exists(output_path):
+        print(f"Already branded: {output_path}")
+        return output_path
 
+    print("Branding main video...")
+    font        = get_font()
+    font_opt    = f"fontfile={font}:" if font else ""
+    safe_author = clean_text(author)
+    speed       = PLAYBACK_SPEED
+    clip_dur    = get_smart_trim_point(input_path, MAX_CLIP_SECONDS, speed)
+
+    print(f"  Clip: {clip_dur:.1f}s | Speed: {speed}x")
+
+    filters = []
+    filters.append(f"scale={TT_W}:{TT_H}:force_original_aspect_ratio=decrease")
+    filters.append(f"pad={TT_W}:{TT_H}:(ow-iw)/2:(oh-ih)/2:color=black")
+    filters.append(f"setpts=PTS/{speed}")
+    filters.append("eq=contrast=1.22:saturation=1.55:brightness=0.03:gamma=1.08")
+    filters.append(
+        "curves="
+        "r='0/0 0.25/0.22 0.50/0.52 0.75/0.80 1/1':"
+        "g='0/0 0.25/0.21 0.50/0.51 0.75/0.79 1/1':"
+        "b='0/0 0.25/0.19 0.50/0.49 0.75/0.77 1/1'"
+    )
+    filters.append("unsharp=5:5:0.7:5:5:0.0")
+    filters.append("vignette=PI/5")
+
+    if srt_path and os.path.exists(srt_path):
+        srt_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
+        filters.append(f"subtitles={srt_escaped}")
+
+    credit_y = TT_H - SAFE_BOTTOM - 15
+    filters.append(
+        f"drawtext={font_opt}"
+        f"text='Credit  @{safe_author}':"
+        f"fontsize=30:fontcolor=white@0.80:"
+        f"x=(w-text_w)/2:y={credit_y}:"
+        f"borderw=2:bordercolor=black@0.65"
+    )
+
+    vf = ",".join(filters)
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", input_path,
+        "-t", str(clip_dur),
+        "-vf", vf,
+        "-af", f"aresample=44100,atempo={speed}",
+        "-map", "0:v:0",
+        "-map", "0:a:0?",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k",
+        "-ar", "44100",
+        "-pix_fmt", "yuv420p",
+        output_path
+    ]
+
+    if not run_cmd(cmd, "brand main"):
+        return None
+    return output_path
+    
 # ── Brand main video ──────────────────────────────────────────────────────────
 
 def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str) -> str | None:
@@ -429,9 +497,9 @@ def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str)
       4. A glassmorphic (frosted-glass) card overlays the top, showing title +
          short description, with a left-to-right wipe-reveal animation
 
-    NOTE: exact pixel/timing values below are a first-pass best effort —
-    they have NOT been visually verified against a real render yet and
-    will likely need tuning after seeing actual output.
+    Description is wrapped into multiple lines (via textfile=, since drawtext's
+    text= does not auto-wrap) and the card height is computed dynamically so
+    title and description never overlap regardless of description length.
     """
     output_path = os.path.join(OUTPUT_DIR, f"{video_id}_tmdb_visual.mp4")
     if os.path.exists(output_path):
@@ -441,47 +509,61 @@ def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str)
     font_opt = f"fontfile={font}:" if font else ""
 
     safe_title    = clean_text(title)[:40]
-    safe_overview = clean_text(overview)[:120]
+    safe_overview = clean_text(overview)[:160]
+
+    # Wrap description into multiple lines — cap at 4 lines so the card
+    # never grows absurdly tall on a long overview.
+    desc_lines = textwrap.wrap(safe_overview, width=32) or [""]
+    desc_lines = desc_lines[:4]
+    desc_text  = "\n".join(desc_lines)
+
+    fd, desc_file = tempfile.mkstemp(suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(desc_text)
+    desc_file_escaped = desc_file.replace("\\", "/").replace(":", "\\:")
+
+    title_fontsize = 54
+    desc_fontsize  = 30
+    desc_line_height = int(desc_fontsize * 1.3) + 8  # fontsize + line_spacing
+
+    title_block_height = int(title_fontsize * 1.3)
+    desc_block_height  = desc_line_height * len(desc_lines)
+    pad_top, pad_gap, pad_bottom = 30, 20, 30
 
     card_top    = 160
-    card_height = 260
+    card_height = pad_top + title_block_height + pad_gap + desc_block_height + pad_bottom
     card_left   = 60
     card_width  = TT_W - 120
+
+    title_y = card_top + pad_top
+    desc_y  = title_y + title_block_height + pad_gap
 
     filter_complex = (
         f"[0:v]crop=iw:ih*{1 - CAPTION_CROP_RATIO}:0:0[cropped];"
         f"[cropped]split=2[bg_src][fg_src];"
 
-        # Blurred background fill
         f"[bg_src]scale={TT_W}:{TT_H}:force_original_aspect_ratio=increase,"
         f"crop={TT_W}:{TT_H},boxblur=25:5,eq=brightness=-0.08[bg];"
 
-        # Foreground: slight horizontal stretch, fit to canvas width
         f"[fg_src]scale=iw*{FOREGROUND_STRETCH}:ih,"
         f"scale={TT_W}:-1[fg];"
 
-        # Composite foreground over blurred background, vertically centered
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2[merged];"
 
-        # Glassmorphic card background (semi-transparent rounded box approximation)
         f"[merged]drawbox="
         f"x={card_left}:y={card_top}:w={card_width}:h={card_height}:"
         f"color=black@0.35:thickness=fill[card_bg];"
 
-        # Title text
         f"[card_bg]drawtext={font_opt}"
-        f"text='{safe_title}':fontsize=54:fontcolor=white:"
-        f"x={card_left + 30}:y={card_top + 30}:"
+        f"text='{safe_title}':fontsize={title_fontsize}:fontcolor=white:"
+        f"x={card_left + 30}:y={title_y}:"
         f"borderw=2:bordercolor=black@0.5[title_layer];"
 
-        # Description text
         f"[title_layer]drawtext={font_opt}"
-        f"text='{safe_overview}':fontsize=30:fontcolor=white@0.90:"
-        f"x={card_left + 30}:y={card_top + 110}:"
+        f"textfile={desc_file_escaped}:fontsize={desc_fontsize}:fontcolor=white@0.90:"
+        f"x={card_left + 30}:y={desc_y}:"
         f"line_spacing=8[desc_layer];"
 
-        # Wipe-reveal: a solid box matching the card's color slides away
-        # left-to-right, uncovering the text underneath over CARD_REVEAL_SECONDS
         f"[desc_layer]drawbox="
         f"x='{card_left}+({card_width})*min(1,t/{CARD_REVEAL_SECONDS})':"
         f"y={card_top}:w={card_width}:h={card_height}:"
@@ -500,7 +582,14 @@ def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str)
         output_path
     ]
 
-    if not run_cmd(cmd, "tmdb visual treatment"):
+    ok = run_cmd(cmd, "tmdb visual treatment")
+
+    try:
+        os.unlink(desc_file)
+    except Exception:
+        pass
+
+    if not ok:
         return None
     return output_path
 
@@ -531,7 +620,7 @@ def apply_rotation(input_path: str, video_id: str, degrees: float = 2.5) -> str:
 
 # ── Outro card ────────────────────────────────────────────────────────────────
 
-def generate_outro(video_id: str, author: str):
+def generate_outro(video_id: str, author: str, title: str = "", overview: str = ""):
     output_path = os.path.join(OUTPUT_DIR, f"{video_id}_outro.mp4")
     if os.path.exists(output_path):
         print(f"Already have outro: {output_path}")
@@ -559,13 +648,44 @@ def generate_outro(video_id: str, author: str):
         f"color={BRAND_ORANGE}@0.55:thickness=fill"
     )
 
+    has_title_block = bool(title.strip())
+    desc_files = []  # track temp files for cleanup
+
+    if has_title_block:
+        safe_title = clean_text(title)[:40]
+
+        title_text = (
+            f"drawtext={font_opt}text='{safe_title}':fontsize=52:fontcolor=white:"
+            f"x=(w-text_w)/2:y='h/2-360':"
+            f"alpha='min(1,max(0,(t-0.15)/0.35))':"
+            f"borderw=2:bordercolor=black@0.5"
+        )
+
+        safe_overview = clean_text(overview)[:160]
+        desc_lines = textwrap.wrap(safe_overview, width=32)[:3] or [""]
+        desc_text  = "\n".join(desc_lines)
+
+        fd, desc_file = tempfile.mkstemp(suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(desc_text)
+        desc_files.append(desc_file)
+        desc_file_escaped = desc_file.replace("\\", "/").replace(":", "\\:")
+
+        desc_text_filter = (
+            f"drawtext={font_opt}textfile={desc_file_escaped}:fontsize=28:"
+            f"fontcolor=white@0.85:x=(w-text_w)/2:y='h/2-280':"
+            f"line_spacing=6:alpha='min(1,max(0,(t-0.30)/0.35))'"
+        )
+    else:
+        title_text = None
+        desc_text_filter = None
+
     follow_y = "h/2-text_h/2-40-50*max(0,1-max(0,(t-0.20)/0.45))"
     follow = (
         f"drawtext={font_opt}text='FOLLOW FOR MORE':fontsize=64:fontcolor=white:"
         f"x=(w-text_w)/2:y='{follow_y}':alpha='min(1,max(0,(t-0.20)/0.40))'"
     )
 
-    handle_scale = "1+0.15*max(0,1-max(0,(t-0.55)/0.35))"
     handle = (
         f"drawtext={font_opt}text='{ACCOUNT_HANDLE}':fontsize=80:fontcolor={BRAND_ORANGE}:"
         f"x=(w-text_w)/2:y='h/2-text_h/2+50':"
@@ -579,7 +699,14 @@ def generate_outro(video_id: str, author: str):
         f"alpha='min(1,max(0,(t-1.20)/0.40))'"
     )
 
-    vf = ",".join([bg, sweep1, sweep2, follow, handle, credit])
+    layers = [bg, sweep1, sweep2]
+    if title_text:
+        layers.append(title_text)
+    if desc_text_filter:
+        layers.append(desc_text_filter)
+    layers += [follow, handle, credit]
+
+    vf = ",".join(layers)
 
     cmd = [
         "ffmpeg", "-y",
@@ -594,7 +721,15 @@ def generate_outro(video_id: str, author: str):
         output_path
     ]
 
-    if not run_cmd(cmd, "outro"):
+    ok = run_cmd(cmd, "outro")
+
+    for f in desc_files:
+        try:
+            os.unlink(f)
+        except Exception:
+            pass
+
+    if not ok:
         return None
     return output_path
 
@@ -799,13 +934,7 @@ def process_tiktok_video(video: dict, post_number: int) -> bool:
     if not branded_path:
         return False
 
-    outro_path = generate_outro(video_id, author)
-    if not outro_path:
-        return False
-
-    final_path = concatenate(video_id, branded_path, outro_path)
-    if not final_path:
-        return False
+    final_path = branded_path
 
     print(f"  Final output has audio: {has_audio_stream(final_path)}")
 
@@ -879,7 +1008,8 @@ def process_tmdb_video(video: dict, post_number: int) -> bool:
     else:
         branded_path = rotated_path
 
-    outro_path = generate_outro(video_id, "TMDB")
+    outro_path = generate_outro(video_id, "TMDB", title=title, overview=overview)
+    if not outro_path:
         return False
 
     final_path = concatenate(video_id, branded_path, outro_path)
