@@ -215,21 +215,25 @@ def detect_scene_cuts(path: str) -> list:
     return cuts
 
 
-def get_smart_trim_point(path: str, target_max: float) -> float:
+def get_smart_trim_point(path: str, target_max: float, speed: float = 1.0) -> float:
     """
-    If real duration > target_max, find the nearest scene cut BEFORE
-    target_max so the trim lands on a real cut instead of mid-shot.
-    Falls back to target_max if no scene cuts are found nearby.
-    Always respects MIN_CLIP_SECONDS as an absolute floor.
+    Finds a trim point in the ORIGINAL (pre-speed-up) footage such that
+    AFTER the speed multiplier is applied, the final output lands at
+    ~target_max seconds — not shorter. Without this compensation,
+    trimming to target_max and then speeding up produces a shorter final
+    video than intended (e.g. 50s trimmed + 1.08x speed = ~46s final).
     """
+    adjusted_max = target_max * speed
+    adjusted_min = MIN_CLIP_SECONDS * speed
     real = get_video_duration(path)
-    if real <= target_max:
-        return max(real, MIN_CLIP_SECONDS)
 
-    cuts = [c for c in detect_scene_cuts(path) if MIN_CLIP_SECONDS <= c <= target_max]
+    if real <= adjusted_max:
+        return max(real, adjusted_min)
+
+    cuts = [c for c in detect_scene_cuts(path) if adjusted_min <= c <= adjusted_max]
     if cuts:
         return max(cuts)
-    return target_max
+    return adjusted_max
 
 
 def _srt_timestamp(seconds: float) -> str:
@@ -300,7 +304,7 @@ def brand_main_video(input_path: str, video_id: str, author: str, srt_path=None)
     font        = get_font()
     font_opt    = f"fontfile={font}:" if font else ""
     safe_author = clean_text(author)
-    clip_dur    = get_smart_trim_point(input_path, MAX_CLIP_SECONDS)
+    clip_dur    = get_smart_trim_point(input_path, MAX_CLIP_SECONDS, speed)
     speed       = PLAYBACK_SPEED
 
     print(f"  Clip: {clip_dur:.1f}s | Speed: {speed}x")
@@ -333,17 +337,6 @@ def brand_main_video(input_path: str, video_id: str, author: str, srt_path=None)
             f"Bold=1,Outline=3,Shadow=2,"
             f"Alignment=2,MarginV={caption_margin}'"
         )
-
-    filters.append(
-        f"drawtext={font_opt}"
-        f"text='@TrendDock':fontsize=36:fontcolor=black@0.75:"
-        f"x=30:y={SAFE_TOP + 2}"
-    )
-    filters.append(
-        f"drawtext={font_opt}"
-        f"text='@TrendDock':fontsize=36:fontcolor=white@0.95:"
-        f"x=28:y={SAFE_TOP}:borderw=2:bordercolor={BRAND_ORANGE}@0.85"
-    )
 
     credit_y = TT_H - SAFE_BOTTOM - 15
     filters.append(
@@ -534,7 +527,19 @@ def send_result_to_private_repo(post_number, video_id, author, niche, caption, c
 
 # ── Per-video pipeline ────────────────────────────────────────────────────────
 
+def is_tmdb_source(video: dict) -> bool:
+    """TMDB trailer candidates use video_id format 'tmdb_{movie_id}' — see tmdb_trailer.py."""
+    return str(video.get("video_id", "")).startswith("tmdb_")
+
+
 def process_video(video: dict, post_number: int) -> bool:
+    """Router — dispatches to the TikTok or TMDB processing path."""
+    if is_tmdb_source(video):
+        return process_tmdb_video(video, post_number)
+    return process_tiktok_video(video, post_number)
+
+
+def process_tiktok_video(video: dict, post_number: int) -> bool:
     video_id    = video["video_id"]
     video_url   = video["video_url"]
     description = video.get("description", "Trending Now")
@@ -543,7 +548,7 @@ def process_video(video: dict, post_number: int) -> bool:
     cand_rank   = video.get("rank", "?")
 
     print(f"\n{'='*50}")
-    print(f"TrendDock Render — Candidate #{cand_rank} → Post #{post_number}")
+    print(f"TrendDock Render (TikTok) — Candidate #{cand_rank} → Post #{post_number}")
     print(f"Author : @{author} | Niche: {niche}")
     print(f"{'='*50}\n")
 
@@ -555,7 +560,12 @@ def process_video(video: dict, post_number: int) -> bool:
 
     cleaned_path = remove_black_segments(raw_path, video_id)
 
-    srt_path = generate_captions(cleaned_path)
+    # Stage 4: skip Whisper if this clip already has burned-in captions
+    if has_burned_in_captions(cleaned_path):
+        print("  Clip already has burned-in captions — skipping Whisper")
+        srt_path = None
+    else:
+        srt_path = generate_captions(cleaned_path)
 
     branded_path = brand_main_video(cleaned_path, video_id, author, srt_path)
     if not branded_path:
@@ -589,6 +599,61 @@ def process_video(video: dict, post_number: int) -> bool:
     )
     if not ok:
         print(f"WARNING: video rendered but callback failed for {video_id} — posts_queue will NOT have this entry")
+
+    print(f"\nCandidate #{cand_rank} → Post #{post_number} done")
+    return ok
+
+
+def process_tmdb_video(video: dict, post_number: int) -> bool:
+    """
+    Stage 3 stub — full visual treatment built out in Stage 5.
+    Deliberately does NOT call generate_captions() at all: official
+    trailers already have burned-in captions we plan to remove and
+    replace with our own designed caption system later — running
+    Whisper here now would be wasted work on captions we're not using yet.
+    """
+    video_id    = video["video_id"]
+    video_url   = video["video_url"]
+    title       = video.get("description", "Trending Now")
+    niche       = video.get("niche", "movietrailer")
+    cand_rank   = video.get("rank", "?")
+
+    print(f"\n{'='*50}")
+    print(f"TrendDock Render (TMDB) — Candidate #{cand_rank} → Post #{post_number}")
+    print(f"Title : {title}")
+    print(f"{'='*50}\n")
+
+    raw_path = download_video(video_url, video_id)
+    if not raw_path:
+        return False
+
+    cleaned_path = remove_black_segments(raw_path, video_id)
+
+    # Stage 5 replaces this with the stretch/blur/glassmorphic treatment
+    branded_path = brand_main_video(cleaned_path, video_id, "TMDB", None)
+    if not branded_path:
+        return False
+
+    outro_path = generate_outro(video_id, "TMDB")
+    if not outro_path:
+        return False
+
+    final_path = concatenate(video_id, branded_path, outro_path)
+    if not final_path:
+        return False
+
+    cloudinary_url, thumbnail_url = upload_to_cloudinary(final_path, video_id)
+    if not cloudinary_url:
+        print(f"Cloudinary upload failed for {video_id}")
+        return False
+
+    caption = f"{title[:100]} | via @TrendDock"
+
+    ok = send_result_to_private_repo(
+        post_number, video_id, "TMDB", niche, caption, cloudinary_url, thumbnail_url
+    )
+    if not ok:
+        print(f"WARNING: video rendered but callback failed for {video_id}")
 
     print(f"\nCandidate #{cand_rank} → Post #{post_number} done")
     return ok
