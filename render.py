@@ -537,7 +537,63 @@ def process_video(video: dict, post_number: int) -> bool:
     if is_tmdb_source(video):
         return process_tmdb_video(video, post_number)
     return process_tiktok_video(video, post_number)
+    
+def has_burned_in_captions(video_path: str, samples: int = 5) -> bool:
+    """
+    Samples several frames across the video and OCRs the lower-middle
+    band where captions conventionally sit. If text is reliably detected
+    across a majority of sampled frames, treats the clip as already
+    captioned — used to skip redundant Whisper captioning on TikTok
+    clips that already have burned-in text.
 
+    Heuristic, not perfect — occasional false positives/negatives are
+    expected. Errs toward returning False (run Whisper anyway) if
+    frame sampling itself fails, since a missing caption is a smaller
+    problem than a wrongly-skipped one.
+    """
+    import cv2
+    import pytesseract
+
+    duration = get_video_duration(video_path)
+    if duration <= 0:
+        return False
+
+    hits, checked = 0, 0
+
+    for i in range(samples):
+        t = duration * (i + 1) / (samples + 1)
+        frame_path = os.path.join(OUTPUT_DIR, f"_ocr_sample_{i}.jpg")
+        cmd = [
+            "ffmpeg", "-y", "-ss", str(t), "-i", video_path,
+            "-frames:v", "1", "-q:v", "2", frame_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0 or not os.path.exists(frame_path):
+            continue
+
+        checked += 1
+        img = cv2.imread(frame_path)
+        if img is not None:
+            h, w = img.shape[:2]
+            # lower-middle band — roughly bottom third, center 80% of width
+            band = img[int(h * 0.65):int(h * 0.95), int(w * 0.10):int(w * 0.90)]
+            text = pytesseract.image_to_string(band).strip()
+            if len(text) >= 3:
+                hits += 1
+
+        try:
+            os.unlink(frame_path)
+        except Exception:
+            pass
+
+    if checked == 0:
+        print("  OCR caption check: could not sample frames — assuming no captions")
+        return False
+
+    ratio = hits / checked
+    detected = ratio >= 0.5
+    print(f"  OCR caption check: {hits}/{checked} frames show text ({ratio:.0%}) — burned-in captions: {detected}")
+    return detected
 
 def process_tiktok_video(video: dict, post_number: int) -> bool:
     video_id    = video["video_id"]
