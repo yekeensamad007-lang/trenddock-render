@@ -11,6 +11,8 @@ jobs:
       CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
       CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
       CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: gemini-2.0-flash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
