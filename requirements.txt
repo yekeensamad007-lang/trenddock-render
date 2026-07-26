@@ -2,3 +2,5 @@ requests
 cloudinary
 yt-dlp
 openai-whisper
+opencv-python-headless
+pytesseract
