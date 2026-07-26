@@ -416,6 +416,7 @@ def download_via_ytdlp(video_url: str, output_path: str):
         "--merge-output-format", "mp4",
         "-o", output_path,
         "--no-playlist",
+        video_url,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
