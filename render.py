@@ -21,7 +21,8 @@ import requests
 from datetime import datetime
 import cloudinary
 import cloudinary.uploader
-
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 DECISION_FILE = "decision.json"
 OUTPUT_DIR    = "processed"
 
@@ -43,6 +44,12 @@ MIN_CLIP_SECONDS = 15
 # ── Brand ─────────────────────────────────────────────────────────────────────
 BRAND_ORANGE = "0xFF6B2B"
 
+# ── TMDB visual treatment config ───────────────────────────────────────────────
+CAPTION_CROP_RATIO  = 0.12   # fraction of frame height to crop off the bottom (trailer's own captions)
+FOREGROUND_STRETCH  = 1.08   # horizontal stretch factor for TMDB foreground video
+CARD_REVEAL_SECONDS = 0.6    # duration of the glassmorphic card's wipe-reveal animation
+ACCOUNT_HANDLE      = os.environ.get("ACCOUNT_HANDLE", "@YourHandle")
+
 # ── Font paths ────────────────────────────────────────────────────────────────
 FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -57,6 +64,41 @@ cloudinary.config(
     api_key=os.environ.get("CLOUDINARY_API_KEY"),
     api_secret=os.environ.get("CLOUDINARY_API_SECRET"),
 )
+
+
+def paraphrase_description(overview: str, title: str) -> str:
+    """
+    Rewrites a TMDB movie overview into a short, punchy description
+    suited for a vertical-video card. Falls back to a truncated version
+    of the original overview if Gemini is unavailable or fails —
+    this must never block rendering.
+    """
+    if not GEMINI_API_KEY or not overview:
+        return overview[:140]
+
+    prompt = (
+        f"Rewrite this movie synopsis for '{title}' as a short, punchy, "
+        f"exciting 1-2 sentence teaser (max 140 characters) suitable for "
+        f"a vertical social video caption. No spoilers beyond the premise. "
+        f"Return ONLY the rewritten text, nothing else.\n\n"
+        f"Original: {overview}"
+    )
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    try:
+        resp = requests.post(
+            url,
+            headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=20
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return text[:140] if text else overview[:140]
+    except (requests.RequestException, KeyError, IndexError) as e:
+        print(f"  Gemini paraphrase failed ({e}) — using original overview")
+        return overview[:140]
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -266,7 +308,91 @@ def generate_captions(video_path: str):
     except Exception as e:
         print(f"  Caption generation failed: {e}")
         return None
+        
+EMOJI_KEYWORDS = {
+    "fire": "🔥", "crazy": "🤯", "love": "❤️", "money": "💰",
+    "win": "🏆", "fight": "⚔️", "scary": "😱", "funny": "😂",
+    "run": "🏃", "kill": "💀", "secret": "🤫", "shock": "😲",
+    "power": "⚡", "war": "💥", "dream": "✨", "danger": "⚠️",
+}
 
+
+def _pick_emoji(word: str) -> str:
+    clean = re.sub(r"[^a-z]", "", word.lower())
+    return EMOJI_KEYWORDS.get(clean, "")
+
+
+def generate_karaoke_captions(video_path: str):
+    """
+    Runs Whisper with word-level timestamps and builds an .ass subtitle
+    file with karaoke-style progressive color-fill per word, positioned
+    mid-frame, with occasional keyword-triggered emoji.
+
+    Returns path to the .ass file, or None if Whisper isn't available
+    or transcription fails — must never block rendering.
+    """
+    try:
+        import whisper
+        print("  Generating karaoke captions (Whisper tiny, word-level)...")
+        model  = whisper.load_model("tiny")
+        result = model.transcribe(video_path, fp16=False, word_timestamps=True)
+    except ImportError:
+        print("  Whisper not installed — skipping karaoke captions")
+        return None
+    except Exception as e:
+        print(f"  Caption generation failed: {e}")
+        return None
+
+    fd, ass_path = tempfile.mkstemp(suffix=".ass")
+
+    header = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Karaoke,DejaVu Sans Bold,58,&H00FFFFFF,&H0000A5FF,&H00000000,&H80000000,1,0,1,3,2,5,80,80,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    def ts(seconds: float) -> str:
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = seconds % 60
+        return f"{h:d}:{m:02d}:{s:05.2f}"
+
+    lines = []
+    for seg in result.get("segments", []):
+        words = seg.get("words", [])
+        if not words:
+            continue
+
+        seg_start = words[0]["start"]
+        seg_end   = words[-1]["end"]
+
+        karaoke_text = ""
+        for w in words:
+            dur_cs = max(int((w["end"] - w["start"]) * 100), 1)  # centiseconds
+            word_text = w["word"].strip()
+            emoji = _pick_emoji(word_text)
+            if emoji:
+                word_text = f"{word_text} {emoji}"
+            karaoke_text += f"{{\\k{dur_cs}}}{word_text} "
+
+        lines.append(
+            f"Dialogue: 0,{ts(seg_start)},{ts(seg_end)},Karaoke,,0,0,0,,{karaoke_text.strip()}"
+        )
+
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(header)
+        f.write("\n".join(lines))
+
+    print(f"  Karaoke captions ready ({len(lines)} lines)")
+    return ass_path
 
 # ── Download ──────────────────────────────────────────────────────────────────
 
@@ -379,6 +505,30 @@ def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str)
     return output_path
 
 
+def apply_rotation(input_path: str, video_id: str, degrees: float = 2.5) -> str:
+    """
+    Applies a slight tilt to the whole frame, left or right, then crops
+    back to the original canvas size to avoid black corner triangles
+    the rotation would otherwise expose.
+    """
+    output_path = os.path.join(OUTPUT_DIR, f"{video_id}_rotated.mp4")
+    angle_rad = degrees * 3.14159265 / 180
+
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-vf", (
+            f"rotate={angle_rad}:ow=rotw({angle_rad}):oh=roth({angle_rad}),"
+            f"crop={TT_W}:{TT_H}:(iw-{TT_W})/2:(ih-{TT_H})/2"
+        ),
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:a", "copy",
+        output_path
+    ]
+    if run_cmd(cmd, "rotate"):
+        return output_path
+    return input_path
+
+
 # ── Outro card ────────────────────────────────────────────────────────────────
 
 def generate_outro(video_id: str, author: str):
@@ -391,35 +541,45 @@ def generate_outro(video_id: str, author: str):
     font_opt    = f"fontfile={font}:" if font else ""
     safe_author = clean_text(author)
 
-    print("Generating animated outro...")
+    print("Generating designed outro...")
 
-    sweep = (
-        f"drawbox=x=0:y='(ih-10)/2':w='iw*min(1,t/0.40)':h=10:"
-        f"color={BRAND_ORANGE}@0.95:thickness=fill"
+    bg = (
+        f"[0:v]geq="
+        f"r='40+20*sin(2*PI*Y/H)':"
+        f"g='20+10*sin(2*PI*Y/H)':"
+        f"b='60+25*sin(2*PI*Y/H)'"
     )
-    follow_y = "h/2-text_h/2-190-65*max(0,1-max(0,(t-0.20)/0.50))"
+
+    sweep1 = (
+        f"drawbox=x=0:y='(ih/2)-60':w='iw*min(1,t/0.35)':h=6:"
+        f"color={BRAND_ORANGE}@0.90:thickness=fill"
+    )
+    sweep2 = (
+        f"drawbox=x='iw*max(0,1-min(1,(t-0.10)/0.35))':y='(ih/2)+60':w='iw':h=6:"
+        f"color={BRAND_ORANGE}@0.55:thickness=fill"
+    )
+
+    follow_y = "h/2-text_h/2-40-50*max(0,1-max(0,(t-0.20)/0.45))"
     follow = (
-        f"drawtext={font_opt}text='Follow':fontsize=76:fontcolor=white:"
+        f"drawtext={font_opt}text='FOLLOW FOR MORE':fontsize=64:fontcolor=white:"
         f"x=(w-text_w)/2:y='{follow_y}':alpha='min(1,max(0,(t-0.20)/0.40))'"
     )
-    handle_x = "(w-text_w)/2+(w+text_w)*max(0,1-max(0,(t-0.50)/0.50))"
+
+    handle_scale = "1+0.15*max(0,1-max(0,(t-0.55)/0.35))"
     handle = (
-        f"drawtext={font_opt}text='@TrendDock':fontsize=86:fontcolor={BRAND_ORANGE}:"
-        f"x='{handle_x}':y='h/2-text_h/2-45':"
-        f"alpha='min(1,max(0,(t-0.50)/0.45))':borderw=3:bordercolor=white@0.25"
-    )
-    tagline = (
-        f"drawtext={font_opt}text='For daily fire content':fontsize=38:"
-        f"fontcolor={BRAND_ORANGE}@0.85:x=(w-text_w)/2:y='h/2+92':"
-        f"alpha='min(1,max(0,(t-0.90)/0.40))'"
-    )
-    credit = (
-        f"drawtext={font_opt}text='Credit  @{safe_author}':fontsize=28:"
-        f"fontcolor=white@0.45:x=(w-text_w)/2:y='h/2+178':"
-        f"alpha='min(1,max(0,(t-1.30)/0.40))'"
+        f"drawtext={font_opt}text='{ACCOUNT_HANDLE}':fontsize=80:fontcolor={BRAND_ORANGE}:"
+        f"x=(w-text_w)/2:y='h/2-text_h/2+50':"
+        f"alpha='min(1,max(0,(t-0.55)/0.40))':"
+        f"borderw=3:bordercolor=white@0.20"
     )
 
-    vf = ",".join([sweep, follow, handle, tagline, credit])
+    credit = (
+        f"drawtext={font_opt}text='Credit  @{safe_author}':fontsize=28:"
+        f"fontcolor=white@0.45:x=(w-text_w)/2:y='h/2+220':"
+        f"alpha='min(1,max(0,(t-1.20)/0.40))'"
+    )
+
+    vf = ",".join([bg, sweep1, sweep2, follow, handle, credit])
 
     cmd = [
         "ffmpeg", "-y",
@@ -633,7 +793,7 @@ def process_tiktok_video(video: dict, post_number: int) -> bool:
         print("  Clip already has burned-in captions — skipping Whisper")
         srt_path = None
     else:
-        srt_path = generate_captions(cleaned_path)
+        srt_path = generate_karaoke_captions(cleaned_path)
 
     branded_path = brand_main_video(cleaned_path, video_id, author, srt_path)
     if not branded_path:
@@ -697,13 +857,29 @@ def process_tmdb_video(video: dict, post_number: int) -> bool:
 
     cleaned_path = remove_black_segments(raw_path, video_id)
 
-    overview = video.get("overview", "")
+    raw_overview = video.get("overview", "")
+    overview     = paraphrase_description(raw_overview, title)
     branded_path = build_tmdb_visual(cleaned_path, video_id, title, overview)
     if not branded_path:
         return False
 
+    rotated_path = apply_rotation(branded_path, video_id, degrees=2.5)
+    ass_path = generate_karaoke_captions(rotated_path)
+
+    if ass_path:
+        captioned_path = os.path.join(OUTPUT_DIR, f"{video_id}_captioned.mp4")
+        ass_escaped = ass_path.replace("\\", "/").replace(":", "\\:")
+        cmd = [
+            "ffmpeg", "-y", "-i", rotated_path,
+            "-vf", f"subtitles={ass_escaped}",
+            "-c:a", "copy",
+            captioned_path
+        ]
+        branded_path = captioned_path if run_cmd(cmd, "burn tmdb captions") else rotated_path
+    else:
+        branded_path = rotated_path
+
     outro_path = generate_outro(video_id, "TMDB")
-    if not outro_path:
         return False
 
     final_path = concatenate(video_id, branded_path, outro_path)
