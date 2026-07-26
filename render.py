@@ -405,11 +405,10 @@ def download_video(video_url: str, video_id: str):
     print(f"Downloading {video_id}...")
     cmd = [
         "yt-dlp",
-        "-f", "best[ext=mp4]/best",
+        "-f", "bestvideo+bestaudio/best[ext=mp4]/best",
         "--merge-output-format", "mp4",
         "-o", output_path,
         "--no-playlist",
-        video_url
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
