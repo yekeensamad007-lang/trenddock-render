@@ -294,75 +294,87 @@ def download_video(video_url: str, video_id: str):
 
 # ── Brand main video ──────────────────────────────────────────────────────────
 
-def brand_main_video(input_path: str, video_id: str, author: str, srt_path=None):
-    output_path = os.path.join(OUTPUT_DIR, f"{video_id}_branded.mp4")
+def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str) -> str | None:
+    """
+    TMDB-specific visual treatment:
+      1. Crop off the bottom band to remove the trailer's own burned-in captions
+      2. Slight horizontal stretch on the foreground footage
+      3. Blurred, zoomed copy of the same footage fills the full 1080x1920 canvas
+      4. A glassmorphic (frosted-glass) card overlays the top, showing title +
+         short description, with a left-to-right wipe-reveal animation
+
+    NOTE: exact pixel/timing values below are a first-pass best effort —
+    they have NOT been visually verified against a real render yet and
+    will likely need tuning after seeing actual output.
+    """
+    output_path = os.path.join(OUTPUT_DIR, f"{video_id}_tmdb_visual.mp4")
     if os.path.exists(output_path):
-        print(f"Already branded: {output_path}")
         return output_path
 
-    print("Branding main video...")
-    font        = get_font()
-    font_opt    = f"fontfile={font}:" if font else ""
-    safe_author = clean_text(author)
-    clip_dur    = get_smart_trim_point(input_path, MAX_CLIP_SECONDS, speed)
-    speed       = PLAYBACK_SPEED
+    font     = get_font()
+    font_opt = f"fontfile={font}:" if font else ""
 
-    print(f"  Clip: {clip_dur:.1f}s | Speed: {speed}x")
+    safe_title    = clean_text(title)[:40]
+    safe_overview = clean_text(overview)[:120]
 
-    filters = []
-    filters.append(f"scale={TT_W}:{TT_H}:force_original_aspect_ratio=decrease")
-    filters.append(f"pad={TT_W}:{TT_H}:(ow-iw)/2:(oh-ih)/2:color=black")
-    filters.append(f"setpts=PTS/{speed}")
-    filters.append("eq=contrast=1.22:saturation=1.55:brightness=0.03:gamma=1.08")
-    filters.append(
-        "curves="
-        "r='0/0 0.25/0.22 0.50/0.52 0.75/0.80 1/1':"
-        "g='0/0 0.25/0.21 0.50/0.51 0.75/0.79 1/1':"
-        "b='0/0 0.25/0.19 0.50/0.49 0.75/0.77 1/1'"
+    card_top    = 160
+    card_height = 260
+    card_left   = 60
+    card_width  = TT_W - 120
+
+    filter_complex = (
+        f"[0:v]crop=iw:ih*{1 - CAPTION_CROP_RATIO}:0:0[cropped];"
+        f"[cropped]split=2[bg_src][fg_src];"
+
+        # Blurred background fill
+        f"[bg_src]scale={TT_W}:{TT_H}:force_original_aspect_ratio=increase,"
+        f"crop={TT_W}:{TT_H},boxblur=25:5,eq=brightness=-0.08[bg];"
+
+        # Foreground: slight horizontal stretch, fit to canvas width
+        f"[fg_src]scale=iw*{FOREGROUND_STRETCH}:ih,"
+        f"scale={TT_W}:-1[fg];"
+
+        # Composite foreground over blurred background, vertically centered
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2[merged];"
+
+        # Glassmorphic card background (semi-transparent rounded box approximation)
+        f"[merged]drawbox="
+        f"x={card_left}:y={card_top}:w={card_width}:h={card_height}:"
+        f"color=black@0.35:thickness=fill[card_bg];"
+
+        # Title text
+        f"[card_bg]drawtext={font_opt}"
+        f"text='{safe_title}':fontsize=54:fontcolor=white:"
+        f"x={card_left + 30}:y={card_top + 30}:"
+        f"borderw=2:bordercolor=black@0.5[title_layer];"
+
+        # Description text
+        f"[title_layer]drawtext={font_opt}"
+        f"text='{safe_overview}':fontsize=30:fontcolor=white@0.90:"
+        f"x={card_left + 30}:y={card_top + 110}:"
+        f"line_spacing=8[desc_layer];"
+
+        # Wipe-reveal: a solid box matching the card's color slides away
+        # left-to-right, uncovering the text underneath over CARD_REVEAL_SECONDS
+        f"[desc_layer]drawbox="
+        f"x='{card_left}+({card_width})*min(1,t/{CARD_REVEAL_SECONDS})':"
+        f"y={card_top}:w={card_width}:h={card_height}:"
+        f"color=black@1.0:thickness=fill[final]"
     )
-    filters.append("unsharp=5:5:0.7:5:5:0.0")
-    filters.append("vignette=PI/5")
-
-    if srt_path and os.path.exists(srt_path):
-        srt_escaped    = srt_path.replace("\\", "/").replace(":", "\\:")
-        caption_margin = SAFE_BOTTOM + 70
-        filters.append(
-            f"subtitles={srt_escaped}:"
-            f"force_style='"
-            f"FontName=DejaVu Sans Bold,"
-            f"FontSize=48,"
-            f"PrimaryColour=&HFFFFFF,"
-            f"OutlineColour=&H000000,"
-            f"BackColour=&H70000000,"
-            f"Bold=1,Outline=3,Shadow=2,"
-            f"Alignment=2,MarginV={caption_margin}'"
-        )
-
-    credit_y = TT_H - SAFE_BOTTOM - 15
-    filters.append(
-        f"drawtext={font_opt}"
-        f"text='Credit  @{safe_author}':fontsize=30:fontcolor=white@0.80:"
-        f"x=(w-text_w)/2:y={credit_y}:borderw=2:bordercolor=black@0.65"
-    )
-
-    vf = ",".join(filters)
 
     cmd = [
         "ffmpeg", "-y",
         "-i", input_path,
-        "-t", str(clip_dur),
-        "-vf", vf,
-        "-af", f"aresample=44100,atempo={speed}",
-        "-map", "0:v:0",
+        "-filter_complex", filter_complex,
+        "-map", "[final]",
         "-map", "0:a:0?",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "aac", "-b:a", "192k",
-        "-ar", "44100",
         "-pix_fmt", "yuv420p",
         output_path
     ]
 
-    if not run_cmd(cmd, "brand main"):
+    if not run_cmd(cmd, "tmdb visual treatment"):
         return None
     return output_path
 
@@ -685,8 +697,8 @@ def process_tmdb_video(video: dict, post_number: int) -> bool:
 
     cleaned_path = remove_black_segments(raw_path, video_id)
 
-    # Stage 5 replaces this with the stretch/blur/glassmorphic treatment
-    branded_path = brand_main_video(cleaned_path, video_id, "TMDB", None)
+    overview = video.get("overview", "")
+    branded_path = build_tmdb_visual(cleaned_path, video_id, title, overview)
     if not branded_path:
         return False
 
