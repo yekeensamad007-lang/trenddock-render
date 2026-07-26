@@ -402,7 +402,14 @@ def download_video(video_url: str, video_id: str):
     if os.path.exists(output_path):
         print(f"Already downloaded: {output_path}")
         return output_path
-    print(f"Downloading {video_id}...")
+
+    if video_id.startswith("tmdb_"):
+        return download_via_rapidapi(video_url, output_path)
+    return download_via_ytdlp(video_url, output_path)
+
+
+def download_via_ytdlp(video_url: str, output_path: str):
+    print(f"Downloading via yt-dlp: {output_path}")
     cmd = [
         "yt-dlp",
         "-f", "bestvideo+bestaudio/best[ext=mp4]/best",
@@ -412,10 +419,54 @@ def download_video(video_url: str, video_id: str):
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"Download failed: {result.stderr[-500:]}")
+        print(f"yt-dlp download failed: {result.stderr[-500:]}")
         return None
     print(f"Downloaded: {output_path}")
     return output_path
+
+
+def download_via_rapidapi(video_url: str, output_path: str):
+    print(f"Downloading via RapidAPI: {output_path}")
+    api_key = os.environ.get("RAPIDAPI_YT_KEY")
+    if not api_key:
+        print("RAPIDAPI_YT_KEY not set — cannot download TMDB/YouTube source")
+        return None
+
+    headers = {
+        "x-rapidapi-key": api_key,
+        "x-rapidapi-host": "youtube-media-downloader.p.rapidapi.com"
+    }
+
+    try:
+        info_resp = requests.get(
+            "https://youtube-media-downloader.p.rapidapi.com/v2/video/details",
+            headers=headers,
+            params={"videoId": _extract_youtube_id(video_url)},
+            timeout=20
+        )
+        info_resp.raise_for_status()
+        data = info_resp.json()
+        download_url = data["videos"]["items"][0]["url"]  # verify shape on first real run
+
+        video_resp = requests.get(download_url, stream=True, timeout=60)
+        video_resp.raise_for_status()
+        with open(output_path, "wb") as f:
+            for chunk in video_resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+    except (requests.RequestException, KeyError, IndexError) as e:
+        print(f"RapidAPI download failed: {e}")
+        return None
+
+    print(f"Downloaded: {output_path}")
+    return output_path
+
+
+def _extract_youtube_id(url: str) -> str:
+    match = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", url)
+    if not match:
+        raise ValueError(f"Could not extract YouTube video ID from {url}")
+    return match.group(1)
 
 def brand_main_video(
     input_path: str,
