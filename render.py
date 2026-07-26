@@ -447,7 +447,19 @@ def download_via_rapidapi(video_url: str, output_path: str):
         )
         info_resp.raise_for_status()
         data = info_resp.json()
-        download_url = data["videos"]["items"][0]["url"]  # verify shape on first real run
+
+        # Most streams are video-only (hasAudio: false) — YouTube serves
+        # higher qualities as separate video/audio tracks. Only the
+        # pre-combined stream (typically 360p, itag 18) has both.
+        video_items = data.get("videos", {}).get("items", [])
+        combined = [v for v in video_items if v.get("hasAudio")]
+
+        if not combined:
+            print("No combined audio+video stream found in RapidAPI response")
+            return None
+
+        download_url = combined[0]["url"]
+        print(f"Using combined stream: {combined[0].get('quality', 'unknown quality')}")
 
         video_resp = requests.get(download_url, stream=True, timeout=60)
         video_resp.raise_for_status()
