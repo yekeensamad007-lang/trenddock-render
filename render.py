@@ -400,32 +400,62 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 YOUTUBE_COOKIES_FILE = "youtube_cookies.txt"
 
 
+def _attempt_download(video_url: str, output_path: str, format_selector: str, extra_args: list) -> bool:
+    cmd = [
+        "yt-dlp",
+        "-f", format_selector,
+        "--merge-output-format", "mp4",
+        "-o", output_path,
+        "--no-playlist",
+        *extra_args,
+        video_url,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"  yt-dlp exited non-zero: {result.stderr[-500:]}")
+        return False
+    return os.path.exists(output_path)
+
+
 def download_video(video_url: str, video_id: str):
     output_path = os.path.join(OUTPUT_DIR, f"{video_id}_raw.mp4")
     if os.path.exists(output_path):
         print(f"Already downloaded: {output_path}")
-        return output_path
-
-    print(f"Downloading {video_id}...")
-    cmd = [
-        "yt-dlp",
-        "-f", "bestvideo+bestaudio/best[ext=mp4]/best",
-        "--merge-output-format", "mp4",
-        "-o", output_path,
-        "--no-playlist",
-    ]
+        if has_audio_stream(output_path):
+            return output_path
+        print(f"  Cached download has no audio — re-downloading {video_id}")
+        os.remove(output_path)
 
     is_youtube = "youtube.com" in video_url or "youtu.be" in video_url
+    extra_args = []
     if is_youtube and os.path.exists(YOUTUBE_COOKIES_FILE) and os.path.getsize(YOUTUBE_COOKIES_FILE) > 0:
-        cmd += ["--cookies", YOUTUBE_COOKIES_FILE]
+        extra_args = ["--cookies", YOUTUBE_COOKIES_FILE]
 
-    cmd.append(video_url)
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"Download failed: {result.stderr[-500:]}")
+    print(f"Downloading {video_id}...")
+    if not _attempt_download(video_url, output_path, "bestvideo+bestaudio/best[ext=mp4]/best", extra_args):
+        print(f"Download failed for {video_id}")
         return None
-    print(f"Downloaded: {output_path}")
+
+    if has_audio_stream(output_path):
+        print(f"Downloaded: {output_path}")
+        return output_path
+
+    # First attempt produced a video-only file — yt-dlp silently fell
+    # through to a single-stream format. Force an explicit two-track
+    # selection and retry once before giving up; a video with no audio
+    # must never reach branding/upload.
+    print(f"  {video_id}: download succeeded but has no audio — retrying with forced format")
+    os.remove(output_path)
+    if not _attempt_download(video_url, output_path, "bestvideo*+bestaudio*", extra_args):
+        print(f"Retry download failed for {video_id}")
+        return None
+
+    if not has_audio_stream(output_path):
+        print(f"  {video_id}: still no audio after retry — abandoning this candidate")
+        os.remove(output_path)
+        return None
+
+    print(f"Downloaded (retry succeeded): {output_path}")
     return output_path
 
 def brand_main_video(
