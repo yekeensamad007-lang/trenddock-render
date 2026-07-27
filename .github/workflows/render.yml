@@ -2,6 +2,7 @@ name: Render Pool
 on:
   repository_dispatch:
     types: [render_pool]
+  workflow_dispatch:
 
 jobs:
   render:
