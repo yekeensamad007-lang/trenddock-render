@@ -957,10 +957,16 @@ def process_tiktok_video(video: dict, post_number: int) -> bool:
     if not branded_path:
         return False
 
-    # Whisper runs SECOND-TO-LAST, on the already-sped, already-branded
-    # video — not the raw clip. Timestamps it produces are native to the
-    # final timeline. Caption burn-in is the actual LAST step.
-    if has_burned_in_captions(branded_path):
+    # Detection runs on cleaned_path (pre-brand) — we're checking whether
+    # the ORIGINAL source clip already has burned-in captions, which has
+    # nothing to do with our own credit-text overlay. Running this check
+    # on branded_path instead would pick up the "Credit @author" text
+    # (it sits inside the same OCR sample band) and falsely report every
+    # video as already-captioned, silently disabling Whisper for everything.
+    #
+    # Whisper transcription still runs on branded_path — that part is
+    # correct and unchanged, since it needs final-timeline timestamps.
+    if has_burned_in_captions(cleaned_path):
         print("  Clip already has burned-in captions — skipping Whisper")
         srt_path = None
     else:
