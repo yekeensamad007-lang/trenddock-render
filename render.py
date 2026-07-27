@@ -397,89 +397,36 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 # ── Download ──────────────────────────────────────────────────────────────────
 
+YOUTUBE_COOKIES_FILE = "youtube_cookies.txt"
+
+
 def download_video(video_url: str, video_id: str):
     output_path = os.path.join(OUTPUT_DIR, f"{video_id}_raw.mp4")
     if os.path.exists(output_path):
         print(f"Already downloaded: {output_path}")
         return output_path
 
-    if video_id.startswith("tmdb_"):
-        return download_via_rapidapi(video_url, output_path)
-    return download_via_ytdlp(video_url, output_path)
-
-
-def download_via_ytdlp(video_url: str, output_path: str):
-    print(f"Downloading via yt-dlp: {output_path}")
+    print(f"Downloading {video_id}...")
     cmd = [
         "yt-dlp",
         "-f", "bestvideo+bestaudio/best[ext=mp4]/best",
         "--merge-output-format", "mp4",
         "-o", output_path,
         "--no-playlist",
-        video_url,
     ]
+
+    is_youtube = "youtube.com" in video_url or "youtu.be" in video_url
+    if is_youtube and os.path.exists(YOUTUBE_COOKIES_FILE) and os.path.getsize(YOUTUBE_COOKIES_FILE) > 0:
+        cmd += ["--cookies", YOUTUBE_COOKIES_FILE]
+
+    cmd.append(video_url)
+
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"yt-dlp download failed: {result.stderr[-500:]}")
+        print(f"Download failed: {result.stderr[-500:]}")
         return None
     print(f"Downloaded: {output_path}")
     return output_path
-
-
-def download_via_rapidapi(video_url: str, output_path: str):
-    print(f"Downloading via RapidAPI: {output_path}")
-    api_key = os.environ.get("RAPIDAPI_YT_KEY")
-    if not api_key:
-        print("RAPIDAPI_YT_KEY not set — cannot download TMDB/YouTube source")
-        return None
-
-    headers = {
-        "x-rapidapi-key": api_key,
-        "x-rapidapi-host": "youtube-media-downloader.p.rapidapi.com"
-    }
-
-    try:
-        info_resp = requests.get(
-            "https://youtube-media-downloader.p.rapidapi.com/v2/video/details",
-            headers=headers,
-            params={"videoId": _extract_youtube_id(video_url)},
-            timeout=20
-        )
-        info_resp.raise_for_status()
-        data = info_resp.json()
-
-        # Most streams are video-only (hasAudio: false) — YouTube serves
-        # higher qualities as separate video/audio tracks. Only the
-        # pre-combined stream (typically 360p, itag 18) has both.
-        video_items = data.get("videos", {}).get("items", [])
-        combined = [v for v in video_items if v.get("hasAudio")]
-
-        if not combined:
-            print("No combined audio+video stream found in RapidAPI response")
-            return None
-
-        download_url = combined[0]["url"]
-        print(f"Using combined stream: {combined[0].get('quality', 'unknown quality')}")
-
-        video_resp = requests.get(download_url, stream=True, timeout=60)
-        video_resp.raise_for_status()
-        with open(output_path, "wb") as f:
-            for chunk in video_resp.iter_content(chunk_size=8192):
-                f.write(chunk)
-
-    except (requests.RequestException, KeyError, IndexError) as e:
-        print(f"RapidAPI download failed: {e}")
-        return None
-
-    print(f"Downloaded: {output_path}")
-    return output_path
-
-
-def _extract_youtube_id(url: str) -> str:
-    match = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", url)
-    if not match:
-        raise ValueError(f"Could not extract YouTube video ID from {url}")
-    return match.group(1)
 
 def brand_main_video(
     input_path: str,
