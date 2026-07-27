@@ -23,4 +23,6 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Save incoming payload
         run: echo '${{ toJSON(github.event.client_payload) }}' > decision.json
+      - name: Write YouTube cookies
+        run: echo "${{ secrets.YOUTUBE_COOKIES_B64 }}" | base64 -d > youtube_cookies.txt
       - run: python render.py
