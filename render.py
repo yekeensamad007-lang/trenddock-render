@@ -457,20 +457,30 @@ def _extract_youtube_id(url: str) -> str:
     return match.group(1)
 
 
-def download_video(video_url: str, video_id: str):
-    output_path = os.path.join(OUTPUT_DIR, f"{video_id}_raw.mp4")
-    if os.path.exists(output_path):
-        print(f"Already downloaded: {output_path}")
-        if has_audio_stream(output_path):
-            return output_path
-        print(f"  Cached download has no audio — re-downloading {video_id}")
-        os.remove(output_path)
-
-    is_youtube = "youtube.com" in video_url or "youtu.be" in video_url
-    if not is_youtube:
-        print(f"  Unsupported source for current download path: {video_url}")
+def _download_via_ytdlp(video_url: str, output_path: str) -> str | None:
+    print(f"Downloading via yt-dlp: {output_path}")
+    cmd = [
+        "yt-dlp",
+        "-f", "bestvideo*+bestaudio*",
+        "--merge-output-format", "mp4",
+        "-o", output_path,
+        "--no-playlist",
+        video_url,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"  yt-dlp download failed: {result.stderr[-500:]}")
         return None
+    if not has_audio_stream(output_path):
+        print(f"  yt-dlp result has no audio — abandoning")
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return None
+    print(f"Downloaded: {output_path}")
+    return output_path
 
+
+def _download_via_rapidapi(video_url: str, video_id: str, output_path: str) -> str | None:
     api_key = os.environ.get("RAPIDAPI_YT_KEY")
     if not api_key:
         print("RAPIDAPI_YT_KEY not set — cannot download")
@@ -491,11 +501,6 @@ def download_video(video_url: str, video_id: str):
     data = None
     for req_attempt in range(2):
         try:
-            # Confirmed via RapidAPI's own analytics: this endpoint's
-            # normal response time is 20-60 seconds for every caller,
-            # not just GitHub Actions — it's simply a slow API, not a
-            # bot-detection or connectivity issue. 90s gives real margin
-            # above the slowest observed latency (59s).
             resp = requests.get(
                 f"https://{RAPIDAPI_YT_HOST}/download_video/{yt_id}",
                 headers=headers,
@@ -519,10 +524,6 @@ def download_video(video_url: str, video_id: str):
         print(f"  No file URL in response: {data}")
         return None
 
-    # Confirmed via direct playground test: file readiness takes 20-300s,
-    # and stays downloadable for 10 minutes after that. Poll every 8s for
-    # up to 10 minutes total, trying the primary host first each round
-    # and falling back to reserved_file if the primary keeps 404ing.
     ready_url = None
     max_wait_seconds = 600
     poll_interval = 8
@@ -574,6 +575,21 @@ def download_video(video_url: str, video_id: str):
 
     print(f"Downloaded: {output_path}")
     return output_path
+
+
+def download_video(video_url: str, video_id: str):
+    output_path = os.path.join(OUTPUT_DIR, f"{video_id}_raw.mp4")
+    if os.path.exists(output_path):
+        print(f"Already downloaded: {output_path}")
+        if has_audio_stream(output_path):
+            return output_path
+        print(f"  Cached download has no audio — re-downloading {video_id}")
+        os.remove(output_path)
+
+    is_youtube = "youtube.com" in video_url or "youtu.be" in video_url
+    if is_youtube:
+        return _download_via_rapidapi(video_url, video_id, output_path)
+    return _download_via_ytdlp(video_url, output_path)
 
 def brand_main_video(
     input_path: str,
