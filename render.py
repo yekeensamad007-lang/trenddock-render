@@ -641,24 +641,16 @@ def brand_main_video(
 # ── Brand main video ──────────────────────────────────────────────────────────
 
 def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str) -> str | None:
-    """
-    TMDB-specific visual treatment:
-      1. Crop off the bottom band to remove the trailer's own burned-in captions
-      2. Mirror the footage (hflip) — a clean left/right swap, no skew/tilt
-      3. Scale to COVER the full canvas and crop overflow — fills edge-to-edge
-      4. A glassmorphic (frosted-glass) card overlays the top, showing title +
-         short description, with a left-to-right wipe-reveal animation
-
-    Description is wrapped into multiple lines (via textfile=, since drawtext's
-    text= does not auto-wrap) and the card height is computed dynamically so
-    title and description never overlap regardless of description length.
-    """
     output_path = os.path.join(OUTPUT_DIR, f"{video_id}_tmdb_visual.mp4")
     if os.path.exists(output_path):
         return output_path
 
     font     = get_font()
     font_opt = f"fontfile={font}:" if font else ""
+
+    speed    = PLAYBACK_SPEED
+    clip_dur = get_smart_trim_point(input_path, MAX_CLIP_SECONDS, speed)
+    print(f"  Clip: {clip_dur:.1f}s | Speed: {speed}x")
 
     safe_title    = clean_text(title)[:40]
     safe_overview = clean_text(overview)[:160]
@@ -691,7 +683,12 @@ def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str)
     filter_complex = (
         f"[0:v]crop=iw:ih*{1 - CAPTION_CROP_RATIO}:0:0,hflip,"
         f"scale={TMDB_W}:{TMDB_H}:force_original_aspect_ratio=increase,"
-        f"crop={TMDB_W}:{TMDB_H}[merged];"
+        f"crop={TMDB_W}:{TMDB_H},"
+        # Speed baked in HERE, before Whisper ever sees this file —
+        # same rule learned from the TikTok caption-sync bug: captions
+        # must be generated on the already-sped video, not before it,
+        # or timestamps drift out of sync with the final timeline.
+        f"setpts=PTS/{speed}[merged];"
 
         f"[merged]drawbox="
         f"x={card_left}:y={card_top}:w={card_width}:h={card_height}:"
@@ -716,11 +713,14 @@ def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str)
     cmd = [
         "ffmpeg", "-y",
         "-i", input_path,
+        "-t", str(clip_dur),
         "-filter_complex", filter_complex,
         "-map", "[final]",
         "-map", "0:a:0?",
+        "-af", f"aresample=44100,atempo={speed}",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "aac", "-b:a", "192k",
+        "-ar", "44100",
         "-pix_fmt", "yuv420p",
         output_path
     ]
@@ -848,23 +848,15 @@ def generate_outro(video_id: str, author: str, title: str = "", overview: str = 
         title_text = None
         desc_text_filter = None
 
-    follow_y = "h/2-text_h/2-40-50*max(0,1-max(0,(t-0.20)/0.45))"
+    # Vertically centered between sweep1/sweep2 using ffmpeg's own
+    # text_h, so it sits inside the two lines regardless of fontsize —
+    # no more manual pixel-offset guessing. Handle and credit removed:
+    # TMDB doesn't own the movie, so no credit line makes sense here,
+    # and the handle placeholder was never meant to ship as-is.
     follow = (
-        f"drawtext={font_opt}text='FOLLOW FOR MORE':fontsize=64:fontcolor=white:"
-        f"x=(w-text_w)/2:y='{follow_y}':alpha='min(1,max(0,(t-0.20)/0.40))'"
-    )
-
-    handle = (
-        f"drawtext={font_opt}text='{ACCOUNT_HANDLE}':fontsize=80:fontcolor={BRAND_ORANGE}:"
-        f"x=(w-text_w)/2:y='h/2-text_h/2+50':"
-        f"alpha='min(1,max(0,(t-0.55)/0.40))':"
-        f"borderw=3:bordercolor=white@0.20"
-    )
-
-    credit = (
-        f"drawtext={font_opt}text='Credit  @{safe_author}':fontsize=28:"
-        f"fontcolor=white@0.45:x=(w-text_w)/2:y='h/2+220':"
-        f"alpha='min(1,max(0,(t-1.20)/0.40))'"
+        f"drawtext={font_opt}text='FOLLOW FOR MORE':fontsize=48:fontcolor=white:"
+        f"x=(w-text_w)/2:y='h/2-text_h/2':"
+        f"alpha='min(1,max(0,(t-0.20)/0.40))'"
     )
 
     layers = [bg, sweep1, sweep2]
@@ -872,7 +864,7 @@ def generate_outro(video_id: str, author: str, title: str = "", overview: str = 
         layers.append(title_text)
     if desc_text_filter:
         layers.append(desc_text_filter)
-    layers += [follow, handle, credit]
+    layers.append(follow)
 
     vf = ",".join(layers)
 
