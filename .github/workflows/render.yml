@@ -21,21 +21,6 @@ jobs:
           python-version: '3.11'
       - run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg tesseract-ocr
       - run: pip install -r requirements.txt
-      - name: Write test decision.json
-        run: |
-          cat > decision.json << 'EOF'
-          {
-            "target_posts": 1,
-            "candidates": [
-              {
-                "rank": 1,
-                "video_id": "tmdb_test001",
-                "video_url": "https://youtu.be/Mzw2ttJD2qQ?si=-wGPimGmMM7Y2BNC",
-                "description": "Test Trailer",
-                "niche": "movietrailer",
-                "overview": "A test run to confirm the RapidAPI download path works end to end."
-              }
-            ]
-          }
-          EOF
+      - name: Save incoming payload
+        run: echo '${{ toJSON(github.event.client_payload) }}' > decision.json
       - run: python render.py
