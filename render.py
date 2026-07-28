@@ -397,24 +397,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 # ── Download ──────────────────────────────────────────────────────────────────
 
-YOUTUBE_COOKIES_FILE = "youtube_cookies.txt"
+RAPIDAPI_YT_HOST = "youtube-video-fast-downloader-24-7.p.rapidapi.com"
 
 
-def _attempt_download(video_url: str, output_path: str, format_selector: str, extra_args: list) -> bool:
-    cmd = [
-        "yt-dlp",
-        "-f", format_selector,
-        "--merge-output-format", "mp4",
-        "-o", output_path,
-        "--no-playlist",
-        *extra_args,
-        video_url,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"  yt-dlp exited non-zero: {result.stderr[-500:]}")
-        return False
-    return os.path.exists(output_path)
+def _extract_youtube_id(url: str) -> str:
+    match = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", url)
+    if not match:
+        raise ValueError(f"Could not extract YouTube video ID from {url}")
+    return match.group(1)
 
 
 def download_video(video_url: str, video_id: str):
@@ -427,41 +417,82 @@ def download_video(video_url: str, video_id: str):
         os.remove(output_path)
 
     is_youtube = "youtube.com" in video_url or "youtu.be" in video_url
-    extra_args = []
-    if is_youtube:
-        if os.path.exists(YOUTUBE_COOKIES_FILE) and os.path.getsize(YOUTUBE_COOKIES_FILE) > 0:
-            extra_args += ["--cookies", YOUTUBE_COOKIES_FILE]
-        # The android client doesn't support cookie auth, so it's skipped
-        # automatically anyway when cookies are present — no benefit to
-        # specifying it. Web is the only viable client for cookie-gated
-        # content; its "n" challenge requires a JS runtime (Node.js,
-        # installed in the workflow) to solve, which is the real fix.
-
-    print(f"Downloading {video_id}...")
-    if not _attempt_download(video_url, output_path, "bestvideo+bestaudio/best[ext=mp4]/best", extra_args):
-        print(f"Download failed for {video_id}")
+    if not is_youtube:
+        print(f"  Unsupported source for current download path: {video_url}")
         return None
 
-    if has_audio_stream(output_path):
-        print(f"Downloaded: {output_path}")
-        return output_path
+    api_key = os.environ.get("RAPIDAPI_YT_KEY")
+    if not api_key:
+        print("RAPIDAPI_YT_KEY not set — cannot download")
+        return None
 
-    # First attempt produced a video-only file — yt-dlp silently fell
-    # through to a single-stream format. Force an explicit two-track
-    # selection and retry once before giving up; a video with no audio
-    # must never reach branding/upload.
-    print(f"  {video_id}: download succeeded but has no audio — retrying with forced format")
-    os.remove(output_path)
-    if not _attempt_download(video_url, output_path, "bestvideo*+bestaudio*", extra_args):
-        print(f"Retry download failed for {video_id}")
+    try:
+        yt_id = _extract_youtube_id(video_url)
+    except ValueError as e:
+        print(f"  {e}")
+        return None
+
+    headers = {
+        "x-rapidapi-key": api_key,
+        "x-rapidapi-host": RAPIDAPI_YT_HOST,
+    }
+
+    print(f"Requesting download link for {video_id}...")
+    try:
+        # PLACEHOLDER — exact path/params need confirming against the
+        # "Request" tab of "Get Video Download URL" in your playground.
+        resp = requests.get(
+            f"https://{RAPIDAPI_YT_HOST}/download_video/{yt_id}",
+            headers=headers,
+            params={"quality": "247"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        file_url = data.get("file")
+    except (requests.RequestException, ValueError) as e:
+        print(f"  RapidAPI request failed: {e}")
+        return None
+
+    if not file_url:
+        print(f"  No file URL in response: {data}")
+        return None
+
+    # File takes 20–300s to become ready server-side; poll rather than
+    # blind-sleeping the full window.
+    ready = False
+    for attempt in range(30):
+        time.sleep(10)
+        try:
+            head = requests.head(file_url, timeout=15)
+            if head.status_code == 200:
+                ready = True
+                break
+        except requests.RequestException:
+            pass
+        print(f"  Still processing... ({(attempt + 1) * 10}s elapsed)")
+
+    if not ready:
+        print(f"  File never became ready for {video_id}")
+        return None
+
+    print(f"Downloading {video_id}...")
+    try:
+        video_resp = requests.get(file_url, stream=True, timeout=60)
+        video_resp.raise_for_status()
+        with open(output_path, "wb") as f:
+            for chunk in video_resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+    except requests.RequestException as e:
+        print(f"  Download failed: {e}")
         return None
 
     if not has_audio_stream(output_path):
-        print(f"  {video_id}: still no audio after retry — abandoning this candidate")
+        print(f"  {video_id}: downloaded file has no audio — abandoning")
         os.remove(output_path)
         return None
 
-    print(f"Downloaded (retry succeeded): {output_path}")
+    print(f"Downloaded: {output_path}")
     return output_path
 
 def brand_main_video(
