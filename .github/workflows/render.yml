@@ -30,7 +30,7 @@ jobs:
               {
                 "rank": 1,
                 "video_id": "tmdb_test001",
-                "video_url": "https://youtu.be/0LR2U78MW8A?si=MJEyBtWFFnMDI5aB",
+                "video_url": "https://youtu.be/Mzw2ttJD2qQ?si=-wGPimGmMM7Y2BNC",
                 "description": "Test Trailer",
                 "niche": "movietrailer",
                 "overview": "A test run to confirm the RapidAPI download path works end to end."
