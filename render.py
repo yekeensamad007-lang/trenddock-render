@@ -442,11 +442,16 @@ def download_video(video_url: str, video_id: str):
     data = None
     for req_attempt in range(2):
         try:
+            # Confirmed via RapidAPI's own analytics: this endpoint's
+            # normal response time is 20-60 seconds for every caller,
+            # not just GitHub Actions — it's simply a slow API, not a
+            # bot-detection or connectivity issue. 90s gives real margin
+            # above the slowest observed latency (59s).
             resp = requests.get(
                 f"https://{RAPIDAPI_YT_HOST}/download_video/{yt_id}",
                 headers=headers,
                 params={"quality": "247"},
-                timeout=45,
+                timeout=90,
             )
             resp.raise_for_status()
             data = resp.json()
