@@ -48,9 +48,11 @@ BRAND_ORANGE = "0xFF6B2B"
 
 # ── TMDB visual treatment config ───────────────────────────────────────────────
 CAPTION_CROP_RATIO  = 0.12   # fraction of frame height to crop off the bottom (trailer's own captions)
-FOREGROUND_STRETCH  = 1.08   # horizontal stretch factor for TMDB foreground video
 CARD_REVEAL_SECONDS = 0.6    # duration of the glassmorphic card's wipe-reveal animation
 ACCOUNT_HANDLE      = os.environ.get("ACCOUNT_HANDLE", "@YourHandle")
+
+TMDB_W = 1080
+TMDB_H = 1350   # 4:5 — less extreme than 9:16, still vertical-friendly
 
 # ── Font paths ────────────────────────────────────────────────────────────────
 FONT_CANDIDATES = [
@@ -164,21 +166,29 @@ def get_video_duration(path: str) -> float:
     return 30.0
 
 
-# ── Black-frame / title-card removal ─────────────────────────────────────────
+# ── Bumper / logo-card removal ────────────────────────────────────────────────
 
-def detect_black_segments(path: str) -> list:
+def detect_bumper_segments(path: str) -> list:
     """
-    Finds black-frame ranges (studio idents, title cards) so we can cut
-    them out before branding — teasers commonly pad these in.
-    Returns list of (start, end) tuples in seconds.
+    Detects candidate non-content segments: genuine black frames AND
+    static "frozen" cards (studio idents, rating cards, title cards)
+    that hold with near-zero motion, regardless of color. Plain
+    blackdetect misses colored logo cards (a blue Universal globe, a
+    green MPA card) since they aren't black — freezedetect catches
+    those by looking at motion instead of color.
+
+    Does NOT catch cards with continuous animation (e.g. a rotating
+    3D logo) — there's no cheap, reliable signal for that without
+    actual scene/content classification. Accepted limitation.
     """
-    cmd = [
+    segments = []
+
+    black_cmd = [
         "ffmpeg", "-i", path,
-        "-vf", "blackdetect=d=0.3:pic_th=0.98",
+        "-vf", "blackdetect=d=0.15:pic_th=0.90:pix_th=0.15",
         "-an", "-f", "null", "-"
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    segments = []
+    result = subprocess.run(black_cmd, capture_output=True, text=True)
     for line in result.stderr.splitlines():
         if "black_start" in line:
             try:
@@ -187,54 +197,93 @@ def detect_black_segments(path: str) -> list:
                 segments.append((start, end))
             except (IndexError, ValueError):
                 continue
-    return segments
+
+    freeze_cmd = [
+        "ffmpeg", "-i", path,
+        "-vf", "freezedetect=n=-24dB:d=1.0",
+        "-an", "-f", "null", "-"
+    ]
+    result = subprocess.run(freeze_cmd, capture_output=True, text=True)
+    freeze_start = None
+    for line in result.stderr.splitlines():
+        if "freeze_start:" in line:
+            try:
+                freeze_start = float(line.split("freeze_start:")[1].split()[0])
+            except (IndexError, ValueError):
+                freeze_start = None
+        elif "freeze_end:" in line and freeze_start is not None:
+            try:
+                end = float(line.split("freeze_end:")[1].split()[0])
+                segments.append((freeze_start, end))
+            except (IndexError, ValueError):
+                pass
+            freeze_start = None
+
+    return sorted(segments)
 
 
-def remove_black_segments(input_path: str, video_id: str) -> str:
+def trim_bumpers(input_path: str, video_id: str) -> str:
     """
-    Cuts out detected black-frame ranges (title cards, studio idents)
-    and returns a path to the cleaned video. If no black segments are
-    found, or the cut fails for any reason, returns the ORIGINAL path
-    unchanged — this step must never block the rest of the pipeline.
+    Strips leading and trailing runs of non-content (black frames,
+    static logo/rating cards). Only trims a contiguous run starting
+    at t=0 and a contiguous run ending at the final timestamp —
+    deliberately ignores anything detected mid-video, since a real
+    scene can legitimately cut to black for a beat, and removing that
+    would risk cutting into actual content.
+
+    Falls back to the original file untouched if nothing qualifies —
+    a missed bumper is a smaller problem than an accidentally-cut scene.
     """
     total = get_video_duration(input_path)
-    black = detect_black_segments(input_path)
+    segments = detect_bumper_segments(input_path)
 
-    if not black:
-        print("  No black-frame segments found — skipping cleanup")
+    if not segments:
+        print("  No bumper/black segments detected — skipping trim")
         return input_path
 
-    keep = []
-    cursor = 0.0
-    for start, end in sorted(black):
-        if start > cursor:
-            keep.append((cursor, start))
-        cursor = max(cursor, end)
-    if cursor < total:
-        keep.append((cursor, total))
+    merged = []
+    for seg in segments:
+        if merged and seg[0] <= merged[-1][1] + 0.5:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], seg[1]))
+        else:
+            merged.append(seg)
 
-    if not keep:
-        print("  Black-segment removal would leave nothing — skipping cleanup")
+    start_skip = 0.0
+    for s, e in merged:
+        if s <= start_skip + 0.5:
+            start_skip = max(start_skip, e)
+        else:
+            break
+
+    end_skip = total
+    for s, e in reversed(merged):
+        if e >= end_skip - 0.5:
+            end_skip = min(end_skip, s)
+        else:
+            break
+
+    if start_skip <= 0.0 and end_skip >= total:
+        print("  No leading/trailing bumper run found — skipping trim")
         return input_path
 
-    print(f"  Removing {len(black)} black-frame segment(s), keeping {len(keep)} clean range(s)")
+    if end_skip - start_skip < MIN_CLIP_SECONDS:
+        print("  Bumper trim would leave too little content — skipping trim")
+        return input_path
+
+    print(f"  Trimming bumpers: {start_skip:.1f}s from start, {total - end_skip:.1f}s from end")
 
     output_path = os.path.join(OUTPUT_DIR, f"{video_id}_clean.mp4")
-    select_expr = "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in keep)
-
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
-        "-vf", f"select='{select_expr}',setpts=N/FRAME_RATE/TB",
-        "-af", f"aselect='{select_expr}',asetpts=N/SR/TB",
+        "-ss", f"{start_skip:.2f}", "-to", f"{end_skip:.2f}",
         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
         "-c:a", "aac", "-b:a", "192k",
         output_path
     ]
 
-    if run_cmd(cmd, "remove black segments"):
+    if run_cmd(cmd, "trim bumpers"):
         return output_path
-
-    print("  Black-frame removal failed — falling back to original clip")
+    print("  Bumper trim failed — falling back to original clip")
     return input_path
 
 
@@ -595,8 +644,8 @@ def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str)
     """
     TMDB-specific visual treatment:
       1. Crop off the bottom band to remove the trailer's own burned-in captions
-      2. Slight horizontal stretch on the foreground footage
-      3. Blurred, zoomed copy of the same footage fills the full 1080x1920 canvas
+      2. Mirror the footage (hflip) — a clean left/right swap, no skew/tilt
+      3. Scale to COVER the full canvas and crop overflow — fills edge-to-edge
       4. A glassmorphic (frosted-glass) card overlays the top, showing title +
          short description, with a left-to-right wipe-reveal animation
 
@@ -614,8 +663,6 @@ def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str)
     safe_title    = clean_text(title)[:40]
     safe_overview = clean_text(overview)[:160]
 
-    # Wrap description into multiple lines — cap at 4 lines so the card
-    # never grows absurdly tall on a long overview.
     desc_lines = textwrap.wrap(safe_overview, width=32) or [""]
     desc_lines = desc_lines[:4]
     desc_text  = "\n".join(desc_lines)
@@ -627,7 +674,7 @@ def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str)
 
     title_fontsize = 54
     desc_fontsize  = 30
-    desc_line_height = int(desc_fontsize * 1.3) + 8  # fontsize + line_spacing
+    desc_line_height = int(desc_fontsize * 1.3) + 8
 
     title_block_height = int(title_fontsize * 1.3)
     desc_block_height  = desc_line_height * len(desc_lines)
@@ -636,22 +683,15 @@ def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str)
     card_top    = 160
     card_height = pad_top + title_block_height + pad_gap + desc_block_height + pad_bottom
     card_left   = 60
-    card_width  = TT_W - 120
+    card_width  = TMDB_W - 120
 
     title_y = card_top + pad_top
     desc_y  = title_y + title_block_height + pad_gap
 
     filter_complex = (
-        f"[0:v]crop=iw:ih*{1 - CAPTION_CROP_RATIO}:0:0[cropped];"
-        f"[cropped]split=2[bg_src][fg_src];"
-
-        f"[bg_src]scale={TT_W}:{TT_H}:force_original_aspect_ratio=increase,"
-        f"crop={TT_W}:{TT_H},boxblur=25:5,eq=brightness=-0.08[bg];"
-
-        f"[fg_src]scale=iw*{FOREGROUND_STRETCH}:ih,"
-        f"scale={TT_W}:-1[fg];"
-
-        f"[bg][fg]overlay=(W-w)/2:(H-h)/2[merged];"
+        f"[0:v]crop=iw:ih*{1 - CAPTION_CROP_RATIO}:0:0,hflip,"
+        f"scale={TMDB_W}:{TMDB_H}:force_original_aspect_ratio=increase,"
+        f"crop={TMDB_W}:{TMDB_H}[merged];"
 
         f"[merged]drawbox="
         f"x={card_left}:y={card_top}:w={card_width}:h={card_height}:"
@@ -838,7 +878,7 @@ def generate_outro(video_id: str, author: str, title: str = "", overview: str = 
 
     cmd = [
         "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"color=c=0x0D0D0D:size={TT_W}x{TT_H}:rate=30",
+        "-f", "lavfi", "-i", f"color=c=0x0D0D0D:size={TMDB_W}x{TMDB_H}:rate=30",
         "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
         "-t", "3.5",
         "-vf", vf,
@@ -1049,7 +1089,7 @@ def process_tiktok_video(video: dict, post_number: int) -> bool:
 
     print(f"  Raw download has audio: {has_audio_stream(raw_path)}")
 
-    cleaned_path = remove_black_segments(raw_path, video_id)
+    cleaned_path = trim_bumpers(raw_path, video_id)
 
     branded_path = brand_main_video(cleaned_path, video_id, author)
     if not branded_path:
@@ -1120,7 +1160,7 @@ def process_tmdb_video(video: dict, post_number: int) -> bool:
     if not raw_path:
         return False
 
-    cleaned_path = remove_black_segments(raw_path, video_id)
+    cleaned_path = trim_bumpers(raw_path, video_id)
 
     raw_overview = video.get("overview", "")
     overview     = paraphrase_description(raw_overview, title)
@@ -1128,21 +1168,18 @@ def process_tmdb_video(video: dict, post_number: int) -> bool:
     if not branded_path:
         return False
 
-    rotated_path = apply_rotation(branded_path, video_id, degrees=2.5)
-    ass_path = generate_karaoke_captions(rotated_path)
+    ass_path = generate_karaoke_captions(branded_path)
 
     if ass_path:
         captioned_path = os.path.join(OUTPUT_DIR, f"{video_id}_captioned.mp4")
         ass_escaped = ass_path.replace("\\", "/").replace(":", "\\:")
         cmd = [
-            "ffmpeg", "-y", "-i", rotated_path,
+            "ffmpeg", "-y", "-i", branded_path,
             "-vf", f"subtitles={ass_escaped}",
             "-c:a", "copy",
             captioned_path
         ]
-        branded_path = captioned_path if run_cmd(cmd, "burn tmdb captions") else rotated_path
-    else:
-        branded_path = rotated_path
+        branded_path = captioned_path if run_cmd(cmd, "burn tmdb captions") else branded_path
 
     outro_path = generate_outro(video_id, "TMDB", title=title, overview=overview)
     if not outro_path:
