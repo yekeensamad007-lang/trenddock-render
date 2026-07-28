@@ -428,8 +428,15 @@ def download_video(video_url: str, video_id: str):
 
     is_youtube = "youtube.com" in video_url or "youtu.be" in video_url
     extra_args = []
-    if is_youtube and os.path.exists(YOUTUBE_COOKIES_FILE) and os.path.getsize(YOUTUBE_COOKIES_FILE) > 0:
-        extra_args = ["--cookies", YOUTUBE_COOKIES_FILE]
+    if is_youtube:
+        if os.path.exists(YOUTUBE_COOKIES_FILE) and os.path.getsize(YOUTUBE_COOKIES_FILE) > 0:
+            extra_args += ["--cookies", YOUTUBE_COOKIES_FILE]
+        # YouTube's web player triggers bot-detection more aggressively than
+        # mobile-app-facing endpoints. This is a known, commonly-used yt-dlp
+        # workaround — NOT a guaranteed fix. YouTube and yt-dlp are in an
+        # ongoing back-and-forth over this; if it stops working later, that's
+        # YouTube tightening enforcement again, not something broken here.
+        extra_args += ["--extractor-args", "youtube:player_client=android,web"]
 
     print(f"Downloading {video_id}...")
     if not _attempt_download(video_url, output_path, "bestvideo+bestaudio/best[ext=mp4]/best", extra_args):
