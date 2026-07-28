@@ -2,6 +2,7 @@ name: Render Pool
 on:
   repository_dispatch:
     types: [render_pool]
+  workflow_dispatch:
 
 jobs:
   render:
@@ -25,4 +26,16 @@ jobs:
         run: echo '${{ toJSON(github.event.client_payload) }}' > decision.json
       - name: Write YouTube cookies
         run: echo "${{ secrets.YOUTUBE_COOKIES_B64 }}" | base64 -d > youtube_cookies.txt
+      - name: Test download with player_client fix
+        run: |
+          yt-dlp \
+            -f "bestvideo+bestaudio/best[ext=mp4]/best" \
+            --merge-output-format mp4 \
+            --cookies youtube_cookies.txt \
+            --extractor-args "youtube:player_client=android,web" \
+            -o "test_download.mp4" \
+            "https://youtu.be/0LR2U78MW8A?si=P0UTKBm202FRFb_K"
+          echo "--- File check ---"
+          ls -la test_download.mp4
+          ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 test_download.mp4 && echo "HAS AUDIO" || echo "NO AUDIO DETECTED"
       - run: python render.py
