@@ -22,6 +22,7 @@ import requests
 from datetime import datetime
 import cloudinary
 import cloudinary.uploader
+import time
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 DECISION_FILE = "decision.json"
@@ -438,43 +439,68 @@ def download_video(video_url: str, video_id: str):
     }
 
     print(f"Requesting download link for {video_id}...")
-    try:
-        # PLACEHOLDER — exact path/params need confirming against the
-        # "Request" tab of "Get Video Download URL" in your playground.
-        resp = requests.get(
-            f"https://{RAPIDAPI_YT_HOST}/download_video/{yt_id}",
-            headers=headers,
-            params={"quality": "247"},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        file_url = data.get("file")
-    except (requests.RequestException, ValueError) as e:
-        print(f"  RapidAPI request failed: {e}")
+    data = None
+    for req_attempt in range(2):
+        try:
+            resp = requests.get(
+                f"https://{RAPIDAPI_YT_HOST}/download_video/{yt_id}",
+                headers=headers,
+                params={"quality": "247"},
+                timeout=45,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except (requests.RequestException, ValueError) as e:
+            print(f"  RapidAPI request attempt {req_attempt + 1} failed: {e}")
+
+    if data is None:
+        print(f"  RapidAPI request failed after retry — giving up on {video_id}")
         return None
+
+    file_url = data.get("file")
+    backup_url = data.get("reserved_file")
 
     if not file_url:
         print(f"  No file URL in response: {data}")
         return None
 
-    # File takes 20–300s to become ready server-side; poll rather than
-    # blind-sleeping the full window.
-    ready = False
-    for attempt in range(30):
-        time.sleep(10)
+    # Confirmed via direct playground test: file readiness takes 20-300s,
+    # and stays downloadable for 10 minutes after that. Poll every 8s for
+    # up to 10 minutes total, trying the primary host first each round
+    # and falling back to reserved_file if the primary keeps 404ing.
+    ready_url = None
+    max_wait_seconds = 600
+    poll_interval = 8
+    elapsed = 0
+
+    while elapsed < max_wait_seconds:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
         try:
             head = requests.head(file_url, timeout=15)
             if head.status_code == 200:
-                ready = True
+                ready_url = file_url
                 break
         except requests.RequestException:
             pass
-        print(f"  Still processing... ({(attempt + 1) * 10}s elapsed)")
 
-    if not ready:
-        print(f"  File never became ready for {video_id}")
+        if backup_url:
+            try:
+                head = requests.head(backup_url, timeout=15)
+                if head.status_code == 200:
+                    ready_url = backup_url
+                    break
+            except requests.RequestException:
+                pass
+
+        print(f"  Still processing... ({elapsed}s elapsed)")
+
+    if not ready_url:
+        print(f"  File never became ready for {video_id} after {max_wait_seconds}s")
         return None
+
+    file_url = ready_url
 
     print(f"Downloading {video_id}...")
     try:
