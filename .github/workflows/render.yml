@@ -3,7 +3,6 @@ on:
   repository_dispatch:
     types: [render_pool]
   workflow_dispatch:
-
 jobs:
   render:
     runs-on: ubuntu-latest
@@ -20,19 +19,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       - run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg tesseract-ocr
       - run: pip install -r requirements.txt
+      - run: pip install -U yt-dlp
       - name: Save incoming payload
         run: echo '${{ toJSON(github.event.client_payload) }}' > decision.json
       - name: Write YouTube cookies
         run: echo "${{ secrets.YOUTUBE_COOKIES_B64 }}" | base64 -d > youtube_cookies.txt
-      - name: Test download with player_client fix
+      - name: Test download with Node.js + updated yt-dlp
         run: |
           yt-dlp \
             -f "bestvideo+bestaudio/best[ext=mp4]/best" \
             --merge-output-format mp4 \
             --cookies youtube_cookies.txt \
-            --extractor-args "youtube:player_client=android,web" \
             -o "test_download.mp4" \
             "https://youtu.be/0LR2U78MW8A?si=P0UTKBm202FRFb_K"
           echo "--- File check ---"
