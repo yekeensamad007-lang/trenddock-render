@@ -12,7 +12,7 @@ jobs:
       CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
       CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: gemini-2.0-flash
+      GEMINI_MODEL: gemini-3.5-flash
       RAPIDAPI_YT_KEY: ${{ secrets.RAPIDAPI_YT_KEY }}
     steps:
       - uses: actions/checkout@v4
