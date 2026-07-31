@@ -697,14 +697,19 @@ def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str)
     desc_y  = title_y + title_block_height + pad_gap
 
     filter_complex = (
-        f"[0:v]crop=iw:ih*{1 - CAPTION_CROP_RATIO}:0:0,hflip,"
-        f"scale={TMDB_W}:{TMDB_H}:force_original_aspect_ratio=increase,"
+        f"[0:v]crop=iw:ih*{1 - CAPTION_CROP_RATIO}:0:0,hflip[src];"
+
+        # Blurred, zoomed copy fills the full 9:16 canvas as background
+        f"[src]scale={TT_W}:{TT_H}:force_original_aspect_ratio=increase,"
+        f"crop={TT_W}:{TT_H},boxblur=25:5,eq=brightness=-0.08,"
+        f"setpts=PTS/{speed}[bg];"
+
+        # Foreground keeps its native 4:5 shape, centered in the frame
+        f"[src]scale={TMDB_W}:{TMDB_H}:force_original_aspect_ratio=increase,"
         f"crop={TMDB_W}:{TMDB_H},"
-        # Speed baked in HERE, before Whisper ever sees this file —
-        # same rule learned from the TikTok caption-sync bug: captions
-        # must be generated on the already-sped video, not before it,
-        # or timestamps drift out of sync with the final timeline.
-        f"setpts=PTS/{speed}[merged];"
+        f"setpts=PTS/{speed}[fg];"
+
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2[merged];"
 
         f"[merged]drawbox="
         f"x={card_left}:y={card_top}:w={card_width}:h={card_height}:"
@@ -886,7 +891,7 @@ def generate_outro(video_id: str, author: str, title: str = "", overview: str = 
 
     cmd = [
         "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"color=c=0x0D0D0D:size={TMDB_W}x{TMDB_H}:rate=30",
+        "-f", "lavfi", "-i", f"color=c=0x0D0D0D:size={TT_W}x{TT_H}:rate=30",
         "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
         "-t", "3.5",
         "-vf", vf,
