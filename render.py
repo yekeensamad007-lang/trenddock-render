@@ -69,21 +69,35 @@ cloudinary.config(
     api_secret=os.environ.get("CLOUDINARY_API_SECRET"),
 )
 
-
+def _smart_truncate(text: str, max_len: int) -> str:
+    """
+    Truncates to at most max_len characters without cutting a word or
+    sentence in half. Trims to the last full word boundary within the
+    limit, then drops trailing dangling punctuation.
+    """
+    text = text.strip()
+    if len(text) <= max_len:
+        return text
+    cut = text[:max_len].rsplit(" ", 1)[0].rstrip(",;:-")
+    return cut
+    
 def paraphrase_description(overview: str, title: str) -> str:
-    """
-    Rewrites a TMDB movie overview into a short, punchy description
-    suited for a vertical-video card. Falls back to a truncated version
-    of the original overview if Gemini is unavailable or fails —
-    this must never block rendering.
-    """
-    if not GEMINI_API_KEY or not overview:
-        return overview[:140]
+    MAX_LEN = 180
+    if not GEMINI_API_KEY:
+        print("  GEMINI_API_KEY not set — using original overview (no Gemini attempt made)")
+        return _smart_truncate(overview, MAX_LEN)
+    if not overview:
+        print("  No overview text provided — nothing to paraphrase")
+        return overview
 
     prompt = (
-        f"Rewrite this movie synopsis for '{title}' as a short, punchy, "
-        f"exciting 1-2 sentence teaser (max 140 characters) suitable for "
-        f"a vertical social video caption. No spoilers beyond the premise. "
+        f"Rewrite this movie synopsis for '{title}' as a short, complete, "
+        f"exciting summary suitable for a vertical social video caption. "
+        f"It MUST be a full, coherent thought that ends with proper "
+        f"punctuation — never cut off mid-sentence or mid-word. "
+        f"Target length is 120-170 characters, but a complete sentence "
+        f"matters more than hitting an exact count. "
+        f"No spoilers beyond the premise. "
         f"Return ONLY the rewritten text, nothing else.\n\n"
         f"Original: {overview}"
     )
@@ -99,10 +113,19 @@ def paraphrase_description(overview: str, title: str) -> str:
         resp.raise_for_status()
         data = resp.json()
         text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        return text[:140] if text else overview[:140]
+        if not text:
+            print("  Gemini returned an empty response — using original overview")
+            return _smart_truncate(overview, MAX_LEN)
+        print(f"  Gemini paraphrase SUCCEEDED (model: {GEMINI_MODEL})")
+        return _smart_truncate(text, MAX_LEN + 40)
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else "unknown"
+        body = e.response.text[:300] if e.response is not None else str(e)
+        print(f"  Gemini paraphrase FAILED — HTTP {status} (model: {GEMINI_MODEL}): {body}")
+        return _smart_truncate(overview, MAX_LEN)
     except (requests.RequestException, KeyError, IndexError) as e:
-        print(f"  Gemini paraphrase failed ({e}) — using original overview")
-        return overview[:140]
+        print(f"  Gemini paraphrase FAILED — {type(e).__name__}: {e} (model: {GEMINI_MODEL})")
+        return _smart_truncate(overview, MAX_LEN)
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -669,7 +692,7 @@ def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str)
     print(f"  Clip: {clip_dur:.1f}s | Speed: {speed}x")
 
     safe_title    = clean_text(title)[:40]
-    safe_overview = clean_text(overview)[:160]
+    safe_overview = _smart_truncate(clean_text(overview), 160)
 
     desc_lines = textwrap.wrap(safe_overview, width=32) or [""]
     desc_lines = desc_lines[:4]
@@ -1207,7 +1230,7 @@ def process_tmdb_video(video: dict, post_number: int) -> bool:
         print(f"Cloudinary upload failed for {video_id}")
         return False
 
-    caption = f"{title[:100]} | via @TrendDock"
+    caption = f"{overview} | via @TrendDock"
 
     ok = send_result_to_private_repo(
         post_number, video_id, "TMDB", niche, caption, cloudinary_url, thumbnail_url
