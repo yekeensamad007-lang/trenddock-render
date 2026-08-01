@@ -103,29 +103,47 @@ def paraphrase_description(overview: str, title: str) -> str:
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    try:
-        resp = requests.post(
-            url,
-            headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            timeout=20
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        if not text:
-            print("  Gemini returned an empty response — using original overview")
+    RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+    MAX_ATTEMPTS = 4
+    backoff = 3  # seconds — doubles after each retry (3s, 6s, 12s)
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            resp = requests.post(
+                url,
+                headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=20
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            if not text:
+                print("  Gemini returned an empty response — using original overview")
+                return _smart_truncate(overview, MAX_LEN)
+            print(f"  Gemini paraphrase SUCCEEDED (model: {GEMINI_MODEL}, attempt {attempt}/{MAX_ATTEMPTS})")
+            return _smart_truncate(text, MAX_LEN + 40)
+
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            body = e.response.text[:300] if e.response is not None else str(e)
+
+            if status in RETRYABLE_STATUSES and attempt < MAX_ATTEMPTS:
+                print(f"  Gemini paraphrase attempt {attempt}/{MAX_ATTEMPTS} FAILED — "
+                      f"HTTP {status} (model: {GEMINI_MODEL}), retrying in {backoff}s: {body}")
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+
+            print(f"  Gemini paraphrase FAILED — HTTP {status} (model: {GEMINI_MODEL}) "
+                  f"after {attempt} attempt(s), giving up: {body}")
             return _smart_truncate(overview, MAX_LEN)
-        print(f"  Gemini paraphrase SUCCEEDED (model: {GEMINI_MODEL})")
-        return _smart_truncate(text, MAX_LEN + 40)
-    except requests.HTTPError as e:
-        status = e.response.status_code if e.response is not None else "unknown"
-        body = e.response.text[:300] if e.response is not None else str(e)
-        print(f"  Gemini paraphrase FAILED — HTTP {status} (model: {GEMINI_MODEL}): {body}")
-        return _smart_truncate(overview, MAX_LEN)
-    except (requests.RequestException, KeyError, IndexError) as e:
-        print(f"  Gemini paraphrase FAILED — {type(e).__name__}: {e} (model: {GEMINI_MODEL})")
-        return _smart_truncate(overview, MAX_LEN)
+
+        except (requests.RequestException, KeyError, IndexError) as e:
+            print(f"  Gemini paraphrase FAILED — {type(e).__name__}: {e} (model: {GEMINI_MODEL})")
+            return _smart_truncate(overview, MAX_LEN)
+
+    return _smart_truncate(overview, MAX_LEN)  # unreachable in practice, safety fallback
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -720,15 +738,15 @@ def build_tmdb_visual(input_path: str, video_id: str, title: str, overview: str)
     desc_y  = title_y + title_block_height + pad_gap
 
     filter_complex = (
-        f"[0:v]crop=iw:ih*{1 - CAPTION_CROP_RATIO}:0:0,hflip[src];"
+        f"[0:v]crop=iw:ih*{1 - CAPTION_CROP_RATIO}:0:0,hflip,split=2[src1][src2];"
 
         # Blurred, zoomed copy fills the full 9:16 canvas as background
-        f"[src]scale={TT_W}:{TT_H}:force_original_aspect_ratio=increase,"
+        f"[src1]scale={TT_W}:{TT_H}:force_original_aspect_ratio=increase,"
         f"crop={TT_W}:{TT_H},boxblur=25:5,eq=brightness=-0.08,"
         f"setpts=PTS/{speed}[bg];"
 
         # Foreground keeps its native 4:5 shape, centered in the frame
-        f"[src]scale={TMDB_W}:{TMDB_H}:force_original_aspect_ratio=increase,"
+        f"[src2]scale={TMDB_W}:{TMDB_H}:force_original_aspect_ratio=increase,"
         f"crop={TMDB_W}:{TMDB_H},"
         f"setpts=PTS/{speed}[fg];"
 
