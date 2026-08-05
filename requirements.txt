@@ -4,3 +4,5 @@ yt-dlp
 openai-whisper
 opencv-python-headless
 pytesseract
+rembg
+onnxruntime
