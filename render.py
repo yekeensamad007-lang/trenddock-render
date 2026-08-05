@@ -22,6 +22,7 @@ import requests
 from datetime import datetime
 import cloudinary
 import cloudinary.uploader
+import cast_assets
 import time
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
@@ -53,6 +54,10 @@ ACCOUNT_HANDLE      = os.environ.get("ACCOUNT_HANDLE", "@YourHandle")
 
 TMDB_W = 1080
 TMDB_H = 1350   # 4:5 — less extreme than 9:16, still vertical-friendly
+CASTLINEUP_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "castlineup")
+CASTLINEUP_PUBLIC = os.path.join(CASTLINEUP_DIR, "public")
+CASTLINEUP_OUT   = os.path.join(CASTLINEUP_DIR, "out")
+SLIDE_COUNT      = 5
 
 # ── Font paths ────────────────────────────────────────────────────────────────
 FONT_CANDIDATES = [
@@ -1062,7 +1067,9 @@ def is_tmdb_source(video: dict) -> bool:
 
 
 def process_video(video: dict, post_number: int) -> bool:
-    """Router — dispatches to the TikTok or TMDB processing path."""
+    """Router — dispatches to the cast-lineup, TMDB, or TikTok processing path."""
+    if is_castlineup_source(video):
+        return process_castlineup_video(video, post_number)
     if is_tmdb_source(video):
         return process_tmdb_video(video, post_number)
     return process_tiktok_video(video, post_number)
@@ -1258,7 +1265,195 @@ def process_tmdb_video(video: dict, post_number: int) -> bool:
 
     print(f"\nCandidate #{cand_rank} → Post #{post_number} done")
     return ok
-
+    def is_castlineup_source(video: dict) -> bool:
+    """Cast-lineup candidates use video_id format 'castlineup_{movie_id}' — see decision.py."""
+    return str(video.get("video_id", "")).startswith("castlineup_")
+ 
+ 
+def _stage_image_for_remotion(local_path: str, dest_filename: str) -> str | None:
+    """
+    Copies a locally-downloaded/processed image into castlineup/public/
+    so Remotion's staticFile() can serve it during render. Returns the
+    filename to pass as the prop value (staticFile() takes a filename
+    relative to public/, not a full path).
+    """
+    if not local_path or not os.path.exists(local_path):
+        return None
+    os.makedirs(CASTLINEUP_PUBLIC, exist_ok=True)
+    dest_path = os.path.join(CASTLINEUP_PUBLIC, dest_filename)
+    with open(local_path, "rb") as src, open(dest_path, "wb") as dst:
+        dst.write(src.read())
+    return dest_filename
+ 
+ 
+def prepare_castlineup_props(assets: dict, movie_id: int) -> dict:
+    """
+    Takes cast_assets.build_cast_lineup_assets()'s output (local
+    filesystem paths) and stages everything into castlineup/public/,
+    returning a props dict with FILENAMES (not paths) — the shape
+    CastLineup.tsx expects, since it resolves them via staticFile().
+    """
+    staged_members = []
+    for i, member in enumerate(assets["members"]):
+        filename = None
+        if member.get("imageUrl"):
+            ext = os.path.splitext(member["imageUrl"])[1] or ".jpg"
+            dest_name = f"{movie_id}_cast{i}{ext}"
+            filename = _stage_image_for_remotion(member["imageUrl"], dest_name)
+ 
+        staged_members.append({
+            "name":      member["name"],
+            "character": member["character"],
+            "tagline":   member.get("tagline", ""),
+            "imageUrl":  filename,
+        })
+ 
+    logo_filename = None
+    if assets.get("movieLogoUrl"):
+        logo_filename = _stage_image_for_remotion(
+            assets["movieLogoUrl"], f"{movie_id}_logo.png"
+        )
+ 
+    return {
+        "members":      staged_members,
+        "movieTitle":   assets["movieTitle"],
+        "movieLogoUrl": logo_filename,
+    }
+ 
+ 
+def render_castlineup_slide(props: dict, featured_index: int, video_id: str, slide_num: int) -> str | None:
+    """
+    Invokes Remotion's CLI to render ONE still (one featured member)
+    via subprocess. Requires Node.js + npm dependencies already
+    installed in castlineup/ — see render.yml (still pending as of
+    this writing; will fail in CI until that's added).
+    """
+    ensure_output_dir()
+    os.makedirs(CASTLINEUP_OUT, exist_ok=True)
+    output_path = os.path.join(CASTLINEUP_OUT, f"{video_id}_slide{slide_num}.png")
+ 
+    slide_props = dict(props)
+    slide_props["featuredIndex"] = featured_index
+ 
+    cmd = [
+        "npx", "remotion", "still",
+        "src/index.ts", "CastLineup",
+        output_path,
+        "--props", json.dumps(slide_props),
+    ]
+ 
+    result = subprocess.run(cmd, cwd=CASTLINEUP_DIR, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"FAILED [render slide {slide_num}]:\n{result.stderr[-800:]}")
+        return None
+    print(f"OK [render slide {slide_num}] -> {output_path}")
+    return output_path
+ 
+ 
+def upload_image_to_cloudinary(image_path: str, video_id: str, slide_num: int) -> str | None:
+    """Carousel slides upload as resource_type='image', not 'video' — a genuinely different Cloudinary call than upload_to_cloudinary()."""
+    if not os.path.exists(image_path):
+        print(f"Slide image not found: {image_path}")
+        return None
+    result = cloudinary.uploader.upload(
+        image_path,
+        resource_type="image",
+        folder="trenddock/castlineup",
+        public_id=f"castlineup_{video_id}_{slide_num}_{int(datetime.now().timestamp())}",
+        use_filename=False,
+        unique_filename=False,
+    )
+    return result.get("secure_url")
+ 
+ 
+def send_carousel_result_to_private_repo(post_number, video_id, movie_title, caption, media_urls: list) -> bool:
+    """
+    Carousel equivalent of send_result_to_private_repo() — sends a
+    media_urls LIST instead of one cloudinary_url + thumbnail_url.
+ 
+    NOT YET FUNCTIONAL end-to-end: posts_queue's schema and poster.py's
+    Make.com payload still only handle a single video_url per row (per
+    earlier conversation — this was flagged as a dependency, not yet
+    built). This function will successfully dispatch the event, but
+    the private repo's receiving workflow needs a matching update
+    before a carousel actually reaches posts_queue correctly. Said
+    plainly so this isn't mistaken for a finished pipeline.
+    """
+    if not CALLBACK_TOKEN:
+        print("CALLBACK_TOKEN not set — cannot report carousel result back to private repo!")
+        return False
+ 
+    payload = {
+        "event_type": "render_complete_carousel",
+        "client_payload": {
+            "rank":       post_number,
+            "video_id":   video_id,
+            "author":     movie_title,
+            "niche":      "movietrailer",
+            "caption":    caption,
+            "media_urls": media_urls,
+        }
+    }
+    resp = requests.post(
+        f"https://api.github.com/repos/{PRIVATE_REPO}/dispatches",
+        headers={
+            "Authorization": f"Bearer {CALLBACK_TOKEN}",
+            "Accept": "application/vnd.github+json"
+        },
+        json=payload,
+        timeout=15
+    )
+    if resp.status_code == 204:
+        print(f"Reported carousel rank #{post_number} back to private repo")
+        return True
+    print(f"Carousel callback failed ({resp.status_code}): {resp.text[:200]}")
+    return False
+ 
+ 
+def process_castlineup_video(video: dict, post_number: int) -> bool:
+    video_id  = video["video_id"]
+    movie_id  = video.get("_tmdb_movie_id")
+    cast      = video.get("cast", [])
+    cand_rank = video.get("rank", "?")
+ 
+    print(f"\n{'='*50}")
+    print(f"TrendDock Render (Cast Lineup) — Candidate #{cand_rank} -> Post #{post_number}")
+    print(f"{'='*50}\n")
+ 
+    if not movie_id or not cast:
+        print(f"  Missing movie_id or cast list for {video_id} — cannot build carousel")
+        return False
+ 
+    candidate_for_assets = {
+        "_tmdb_movie_id": movie_id,
+        "_tmdb_title":    video.get("_tmdb_title", ""),
+        "cast":           cast,
+    }
+    assets = cast_assets.build_cast_lineup_assets(candidate_for_assets)
+    props  = prepare_castlineup_props(assets, movie_id)
+ 
+    media_urls = []
+    for i in range(min(SLIDE_COUNT, len(props["members"]))):
+        slide_path = render_castlineup_slide(props, i, video_id, i)
+        if not slide_path:
+            print(f"  Slide {i} failed to render — aborting carousel (partial carousels aren't posted)")
+            return False
+        slide_url = upload_image_to_cloudinary(slide_path, video_id, i)
+        if not slide_url:
+            print(f"  Slide {i} failed to upload — aborting carousel")
+            return False
+        media_urls.append(slide_url)
+ 
+    caption = f"Meet the cast of {assets['movieTitle']} | via @TrendDock"
+ 
+    ok = send_carousel_result_to_private_repo(
+        post_number, video_id, assets["movieTitle"], caption, media_urls
+    )
+    if not ok:
+        print(f"WARNING: carousel rendered but callback failed for {video_id}")
+ 
+    print(f"\nCandidate #{cand_rank} -> Post #{post_number} done (carousel, {len(media_urls)} slides)")
+    return ok
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
