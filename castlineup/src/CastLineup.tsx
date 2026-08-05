@@ -90,7 +90,7 @@ const BackStrip: React.FC<{ member: CastMember; widthPx: number }> = ({
   >
     {member.imageUrl ? (
       <Img
-        src={member.imageUrl}
+        src={staticFile(member.imageUrl)}
         style={{
           width: "100%",
           height: "100%",
@@ -176,7 +176,7 @@ export const CastLineup: React.FC<CastLineupProps> = ({
       >
         {featured.imageUrl ? (
           <Img
-            src={featured.imageUrl}
+            src={staticFile(featured.imageUrl)}
             style={{
               width: "100%",
               height: "100%",
@@ -201,7 +201,7 @@ export const CastLineup: React.FC<CastLineupProps> = ({
       >
         {movieLogoUrl ? (
           <Img
-            src={movieLogoUrl}
+            src={staticFile(movieLogoUrl)}
             style={{ maxWidth: 640, maxHeight: 110, objectFit: "contain" }}
           />
         ) : (
