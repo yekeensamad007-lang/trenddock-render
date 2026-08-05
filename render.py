@@ -1265,7 +1265,9 @@ def process_tmdb_video(video: dict, post_number: int) -> bool:
 
     print(f"\nCandidate #{cand_rank} → Post #{post_number} done")
     return ok
-    def is_castlineup_source(video: dict) -> bool:
+
+
+def is_castlineup_source(video: dict) -> bool:
     """Cast-lineup candidates use video_id format 'castlineup_{movie_id}' — see decision.py."""
     return str(video.get("video_id", "")).startswith("castlineup_")
  
