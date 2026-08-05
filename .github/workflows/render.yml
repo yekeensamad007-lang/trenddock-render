@@ -14,13 +14,25 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_MODEL: gemini-3.5-flash
       RAPIDAPI_YT_KEY: ${{ secrets.RAPIDAPI_YT_KEY }}
+      TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       - run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg tesseract-ocr
       - run: pip install -r requirements.txt
+      - name: Cache rembg model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.u2net
+          key: rembg-u2net-human-seg-v1
+      - name: Install castlineup (Remotion) dependencies
+        working-directory: castlineup
+        run: npm install
       - name: Save incoming payload
         env:
           PAYLOAD: ${{ toJSON(github.event.client_payload) }}
