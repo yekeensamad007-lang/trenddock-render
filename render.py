@@ -1468,6 +1468,7 @@ def process_castlineup_video(video: dict, post_number: int) -> bool:
         media_urls.append(slide_url)
  
     caption = build_castlineup_caption(assets["movieTitle"], video.get("overview", ""), assets["members"])
+    print(f"  Caption: {caption}")
  
     ok = send_carousel_result_to_private_repo(
         post_number, video_id, assets["movieTitle"], caption, media_urls
