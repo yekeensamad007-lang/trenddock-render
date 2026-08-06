@@ -1410,6 +1410,27 @@ def send_carousel_result_to_private_repo(post_number, video_id, movie_title, cap
         return True
     print(f"Carousel callback failed ({resp.status_code}): {resp.text[:200]}")
     return False
+
+
+def build_castlineup_caption(movie_title: str, overview: str, members: list) -> str:
+    """
+    Explanatory movie-blogger-style caption, not just a bare label —
+    synopsis via the same Gemini paraphrase used on trailer posts,
+    plus a cast line so readers get context without swiping through.
+    """
+    synopsis = paraphrase_description(overview, movie_title) if overview else ""
+    names = [m["name"] for m in members if m.get("name")]
+    cast_line = ""
+    if len(names) > 1:
+        cast_line = f"Starring {', '.join(names[:-1])} & {names[-1]}"
+    elif names:
+        cast_line = f"Starring {names[0]}"
+    parts = [movie_title]
+    if synopsis:
+        parts.append(synopsis)
+    if cast_line:
+        parts.append(cast_line)
+    return "\n\n".join(parts)
  
  
 def process_castlineup_video(video: dict, post_number: int) -> bool:
@@ -1446,7 +1467,7 @@ def process_castlineup_video(video: dict, post_number: int) -> bool:
             return False
         media_urls.append(slide_url)
  
-    caption = f"Meet the cast of {assets['movieTitle']} | via @TrendDock"
+    caption = build_castlineup_caption(assets["movieTitle"], video.get("overview", ""), assets["members"])
  
     ok = send_carousel_result_to_private_repo(
         post_number, video_id, assets["movieTitle"], caption, media_urls
