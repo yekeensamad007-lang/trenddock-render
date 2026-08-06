@@ -33,11 +33,8 @@ its own, but is not the finish line.
 import os
 import time
 import requests
-from dotenv import load_dotenv
 
-load_dotenv()
-
-TMDB_API_KEY = os.getenv("TMDB_API_KEY")
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 TMDB_BASE    = "https://api.themoviedb.org/3"
 TMDB_IMG_CDN = "https://image.tmdb.org/t/p"
 
