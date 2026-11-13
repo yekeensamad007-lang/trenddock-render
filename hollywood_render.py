@@ -220,6 +220,10 @@ def run_ffmpeg(command, label):
         raise RuntimeError(f"{label} failed: {result.stderr[-2000:]}")
 
 
+def split_sentences(text):
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", text.strip()) if part.strip()]
+
+
 def make_voiceover(text, wav_path):
     VOICE_DIR.mkdir(parents=True, exist_ok=True)
     if not (VOICE_DIR / f"{VOICE}.onnx").exists():
@@ -227,38 +231,53 @@ def make_voiceover(text, wav_path):
             [sys.executable, "-m", "piper.download_voices", VOICE, "--data-dir", str(VOICE_DIR)],
             check=True, timeout=900,
         )
-    subprocess.run(
-        [
-            sys.executable, "-m", "piper", "-m", VOICE,
-            "--data-dir", str(VOICE_DIR), "-f", str(wav_path), "--", text,
-        ],
-        check=True, timeout=1800,
-    )
 
-
-def split_sentences(text):
-    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", text.strip()) if part.strip()]
-
-
-def write_srt(script, total_seconds, path):
-    sentences = split_sentences(script)
+    sentences = split_sentences(text)
     if not sentences:
         raise RuntimeError("The judge returned no narration for an episode.")
-    weights = [max(1, len(re.findall(r"\w+", sentence))) for sentence in sentences]
-    total_weight = sum(weights)
+    spans = []
     elapsed = 0.0
+    concat_file = wav_path.with_name(f"{wav_path.stem}_parts.txt")
+    parts = []
+    for index, sentence in enumerate(sentences):
+        part = wav_path.with_name(f"{wav_path.stem}_part{index:03}.wav")
+        subprocess.run(
+            [
+                sys.executable, "-m", "piper", "-m", VOICE,
+                "--data-dir", str(VOICE_DIR), "-f", str(part), "--", sentence,
+            ],
+            check=True, timeout=180,
+        )
+        seconds = duration(part)
+        spans.append({"start": elapsed, "end": elapsed + seconds, "text": sentence})
+        elapsed += seconds
+        parts.append(part)
+    concat_file.write_text(
+        "".join(f"file '{part.resolve().as_posix()}'\n" for part in parts),
+        encoding="utf-8",
+    )
+    run_ffmpeg(
+        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", str(wav_path)],
+        "join narration sentences",
+    )
+    return spans
+
+
+def write_srt(spans, time_scale, total_seconds, path):
+    def stamp(value):
+        ms = int(round(value * 1000))
+        h, rem = divmod(ms, 3_600_000)
+        m, rem = divmod(rem, 60_000)
+        s, ms = divmod(rem, 1000)
+        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
     rows = []
-    for index, (sentence, weight) in enumerate(zip(sentences, weights), start=1):
-        start = elapsed
-        elapsed += total_seconds * weight / total_weight
-        end = min(total_seconds, elapsed)
-        def stamp(value):
-            ms = int(round(value * 1000))
-            h, rem = divmod(ms, 3_600_000)
-            m, rem = divmod(rem, 60_000)
-            s, ms = divmod(rem, 1000)
-            return f"{h:02}:{m:02}:{s:02},{ms:03}"
-        rows.append(f"{index}\n{stamp(start)} --> {stamp(end)}\n{sentence}\n")
+    for index, span in enumerate(spans, start=1):
+        start = max(0.0, float(span["start"]) * time_scale)
+        end = min(total_seconds, float(span["end"]) * time_scale)
+        if end <= start:
+            continue
+        rows.append(f"{index}\n{stamp(start)} --> {stamp(end)}\n{span['text']}\n")
     Path(path).write_text("\n".join(rows), encoding="utf-8")
 
 
@@ -292,7 +311,7 @@ def render_episode(source, episode, episode_index, job_id, title, music_path, ou
     ], "join selected scenes")
 
     voice = output_dir / f"ep{episode_index}_voice.wav"
-    make_voiceover(narration, voice)
+    voice_spans = make_voiceover(narration, voice)
     voice_seconds = duration(voice)
     video_seconds = duration(video_only)
     if not 360 <= video_seconds <= 540:
@@ -307,7 +326,7 @@ def render_episode(source, episode, episode_index, job_id, title, music_path, ou
         )
 
     captions = output_dir / f"ep{episode_index}.srt"
-    write_srt(narration, video_seconds, captions)
+    write_srt(voice_spans, video_seconds / voice_seconds, video_seconds, captions)
     final_path = output_dir / f"ep{episode_index}_final.mp4"
     escaped_caption_path = str(captions.resolve()).replace("\\", "/").replace(":", "\\:")
     vf = f"subtitles={escaped_caption_path}"
