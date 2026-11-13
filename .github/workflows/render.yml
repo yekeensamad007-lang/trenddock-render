@@ -65,13 +65,22 @@ jobs:
           CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
           CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
         run: python hollywood_render.py analyze
+      - name: Download private Hollywood source artifact for rendering
+        if: github.event.action == 'hollywood_render'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.client_payload.source_artifact_name }}
+          repository: yekeensamad007-lang/trenddock
+          run-id: ${{ github.event.client_payload.source_run_id }}
+          github-token: ${{ secrets.CALLBACK_TOKEN }}
+          path: hollywood_transfer/${{ github.event.client_payload.job_id }}
       - name: Download private Hollywood edit-plan artifact
         if: github.event.action == 'hollywood_render'
         uses: actions/download-artifact@v4
         with:
           name: ${{ github.event.client_payload.plan_artifact_name }}
           repository: yekeensamad007-lang/trenddock
-          run-id: ${{ github.event.client_payload.source_run_id }}
+          run-id: ${{ github.event.client_payload.plan_run_id }}
           github-token: ${{ secrets.CALLBACK_TOKEN }}
           path: hollywood_plan
       - name: Render Hollywood episodes
@@ -88,3 +97,6 @@ jobs:
         env:
           CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
         run: python hollywood_render.py fail
+      - name: Remove local Hollywood source and temporary media
+        if: always() && (github.event.action == 'hollywood_analyze' || github.event.action == 'hollywood_render')
+        run: rm -rf hollywood_transfer hollywood_plan processed/hollywood
