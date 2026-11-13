@@ -6,3 +6,4 @@ opencv-python-headless
 pytesseract
 rembg
 onnxruntime
+piper-tts==1.8.0

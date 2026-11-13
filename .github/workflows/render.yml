@@ -1,26 +1,20 @@
 name: Render Pool
 on:
   repository_dispatch:
-    types: [render_pool]
+    types: [render_pool, hollywood_analyze, hollywood_render]
   workflow_dispatch:
 jobs:
   render:
     runs-on: ubuntu-latest
     env:
       CLOUDINARY_CLOUD_NAME: dnzxeped5
-      CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
-      CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
-      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: gemini-3.5-flash
-      RAPIDAPI_YT_KEY: ${{ secrets.RAPIDAPI_YT_KEY }}
-      TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - uses: actions/setup-node@v4
+        if: github.event_name == 'workflow_dispatch' || github.event.action == 'render_pool'
         with:
           node-version: '20'
       - run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg tesseract-ocr
@@ -31,10 +25,48 @@ jobs:
           path: ~/.u2net
           key: rembg-u2net-human-seg-v1
       - name: Install castlineup (Remotion) dependencies
+        if: github.event_name == 'workflow_dispatch' || github.event.action == 'render_pool'
         working-directory: castlineup
         run: npm install
+      - name: Cache Piper voice model
+        if: github.event.action == 'hollywood_render'
+        uses: actions/cache@v4
+        with:
+          path: piper_voices
+          key: piper-en-us-lessac-medium-v1
       - name: Save incoming payload
+        if: github.event.action == 'render_pool'
         env:
           PAYLOAD: ${{ toJSON(github.event.client_payload) }}
         run: printf '%s' "$PAYLOAD" > decision.json
-      - run: python render.py
+      - name: Run existing render pool
+        if: github.event_name == 'workflow_dispatch' || github.event.action == 'render_pool'
+        env:
+          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-3.5-flash
+          RAPIDAPI_YT_KEY: ${{ secrets.RAPIDAPI_YT_KEY }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: python render.py
+      - name: Analyze Hollywood source
+        if: github.event.action == 'hollywood_analyze'
+        env:
+          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+          CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
+        run: python hollywood_render.py analyze
+      - name: Render Hollywood episodes
+        if: github.event.action == 'hollywood_render'
+        env:
+          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+          CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
+          HOLLYWOOD_MUSIC_URL: ${{ vars.HOLLYWOOD_MUSIC_URL }}
+          PIPER_DATA_DIR: piper_voices
+        run: python hollywood_render.py render
+      - name: Report Hollywood workflow failure
+        if: failure() && (github.event.action == 'hollywood_analyze' || github.event.action == 'hollywood_render')
+        env:
+          CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
+        run: python hollywood_render.py fail
