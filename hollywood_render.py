@@ -1,8 +1,7 @@
 """Heavy analysis and rendering stages for Hollywood explainers.
 
-The private repository sends only Cloudinary URLs and job metadata. This worker
-keeps video bytes, Whisper work, voice generation, FFmpeg, and finished assets
-on the public GitHub Actions runner.
+This worker downloads private source and edit-plan artifacts, stages media in
+Cloudinary, and sends job events back to the private trenddock repository.
 """
 import json
 import os
@@ -43,6 +42,29 @@ def configure_cloudinary():
 def event_payload():
     with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as handle:
         return json.load(handle).get("client_payload") or {}
+
+
+def upload_video(path, public_id):
+    configure_cloudinary()
+    result = cloudinary.uploader.upload_large(
+        str(path), resource_type="video", folder="trenddock/hollywood/source",
+        public_id=public_id, chunk_size=20_000_000, overwrite=True,
+    )
+    url = result.get("secure_url")
+    if not url:
+        raise RuntimeError("Cloudinary did not return a source video URL.")
+    return url
+
+
+def upload_raw(path, folder, public_id):
+    configure_cloudinary()
+    result = cloudinary.uploader.upload(
+        str(path), resource_type="raw", folder=folder, public_id=public_id, overwrite=True,
+    )
+    url = result.get("secure_url")
+    if not url:
+        raise RuntimeError(f"Cloudinary did not return a URL for {public_id}.")
+    return url
 
 
 def download(url, path):
@@ -168,51 +190,61 @@ def report_failure():
 def analyze():
     payload = event_payload()
     job_id = payload["job_id"]
+    transfer_dir = Path("hollywood_transfer") / job_id
+    video = transfer_dir / "source.mp4"
+    if not video.is_file():
+        raise RuntimeError(f"Source artifact is missing: {video}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="td-hollywood-analysis-") as temp:
-        video = Path(temp) / "source.mp4"
-        download(payload["source_url"], video)
-        video_duration = duration(video)
-        cues = []
-        subtitle_source = None
-        agent_reach_transcript = None
-        if payload.get("subtitles_url"):
-            subtitle_path = Path(temp) / "source.vtt"
-            try:
-                download(payload["subtitles_url"], subtitle_path)
-                cues = parse_vtt(subtitle_path.read_text(encoding="utf-8", errors="replace"))
-                if cues:
-                    subtitle_source = "youtube"
-            except Exception as exc:
-                print(f"Timestamped YouTube subtitles could not be read: {exc}")
-        if not cues and payload.get("transcript_url"):
-            transcript_path = Path(temp) / "agent_reach_transcript.txt"
-            try:
-                download(payload["transcript_url"], transcript_path)
-                agent_reach_transcript = transcript_path.read_text(
-                    encoding="utf-8", errors="replace",
-                ).strip() or None
-            except Exception as exc:
-                print(f"Agent Reach transcript could not be read: {exc}")
-        if not cues:
-            print("No usable timed YouTube subtitles; running local Whisper for cue timings.")
-            cues = transcribe(video)
-            subtitle_source = "whisper"
-        if not cues:
-            raise RuntimeError("Neither YouTube subtitles nor Whisper produced transcript cues.")
+    source_url = upload_video(video, f"source_{job_id}")
+    video_duration = duration(video)
+    cues = []
+    subtitle_source = None
+    transcript_text = None
+    subtitles_url = None
+    transcript_url = None
+    subtitle_path = transfer_dir / "source.vtt"
+    if subtitle_path.is_file():
+        try:
+            cues = parse_vtt(subtitle_path.read_text(encoding="utf-8", errors="replace"))
+            if cues:
+                subtitle_source = "youtube"
+                subtitles_url = upload_raw(
+                    subtitle_path, "trenddock/hollywood/subtitles", f"subtitles_{job_id}",
+                )
+        except Exception as exc:
+            print(f"Timestamped YouTube subtitles could not be read: {exc}")
+    transcript_path = transfer_dir / "transcript.txt"
+    if transcript_path.is_file():
+        transcript_text = transcript_path.read_text(encoding="utf-8", errors="replace").strip() or None
+        if transcript_text:
+            transcript_url = upload_raw(
+                transcript_path, "trenddock/hollywood/transcripts", f"transcript_{job_id}",
+            )
+    if not cues:
+        print("No usable timed YouTube subtitles; running local Whisper for cue timings.")
+        cues = transcribe(video)
+        subtitle_source = "whisper"
+    if not cues:
+        raise RuntimeError("Neither YouTube subtitles nor Whisper produced transcript cues.")
 
-        analysis = {
-            "job_id": job_id,
-            "duration_seconds": video_duration,
-            "subtitle_source": subtitle_source,
-            "transcript": cues,
-            "agent_reach_transcript": agent_reach_transcript,
-            "scene_cuts": scene_cuts(video),
-        }
-        analysis_url = upload_json(analysis, f"analysis_{job_id}")
-    callback("hollywood_analysis_complete", {"job_id": job_id, "analysis_url": analysis_url})
+    analysis = {
+        "job_id": job_id,
+        "duration_seconds": video_duration,
+        "subtitle_source": subtitle_source,
+        "transcript": cues,
+        "agent_reach_transcript": transcript_text,
+        "scene_cuts": scene_cuts(video),
+    }
+    analysis_url = upload_json(analysis, f"analysis_{job_id}")
+    callback("hollywood_analysis_complete", {
+        "job_id": job_id,
+        "analysis_url": analysis_url,
+        "source_url": source_url,
+        "subtitles_url": subtitles_url,
+        "transcript_url": transcript_url,
+        "subtitles_available": bool(subtitles_url or transcript_url),
+    })
     print(f"Analysis ready for {job_id}: {len(cues)} cues, source={subtitle_source}.")
-
 
 def run_ffmpeg(command, label):
     result = subprocess.run(command, capture_output=True, text=True, timeout=7200)
@@ -382,20 +414,25 @@ def render():
     job_id = payload["job_id"]
     plan = payload.get("edit_plan")
     if not plan:
-        plan_response = requests.get(payload["edit_plan_url"], timeout=60)
-        plan_response.raise_for_status()
-        plan = plan_response.json()
+        plan_path = Path("hollywood_plan/edit_plan.json")
+        if plan_path.is_file():
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        elif payload.get("edit_plan_url"):
+            plan_response = requests.get(payload["edit_plan_url"], timeout=60)
+            plan_response.raise_for_status()
+            plan = plan_response.json()
+        else:
+            raise RuntimeError("Render event contains no edit-plan artifact or URL.")
     episodes = plan.get("episodes") or []
     if not 2 <= len(episodes) <= 3:
         raise RuntimeError("Edit plan must contain 2 or 3 episodes.")
     title = payload.get("title") or "Movie Explainer"
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     configure_cloudinary()
-    # The private controller selects/stages Freesound audio and sends only the
-    # Cloudinary URL. Keep the Actions variable as a compatibility fallback.
     music_url = str(payload.get("music_url") or os.environ.get("HOLLYWOOD_MUSIC_URL", "")).strip()
     if not music_url:
         raise RuntimeError("The render event must include music_url or HOLLYWOOD_MUSIC_URL must be configured.")
+    plan_url = upload_json(plan, f"edit_plan_{job_id}")
     with tempfile.TemporaryDirectory(prefix="td-hollywood-render-") as temp:
         temp = Path(temp)
         source = temp / "source.mp4"
@@ -426,9 +463,13 @@ def render():
                 "cloudinary_url": video_url,
                 "thumbnail_url": thumb,
             })
-    callback("hollywood_render_complete", {"job_id": job_id, "title": title, "outputs": outputs})
+    callback("hollywood_render_complete", {
+        "job_id": job_id,
+        "title": title,
+        "outputs": outputs,
+        "edit_plan_url": plan_url,
+    })
     print(f"Rendered and uploaded {len(outputs)} Hollywood explainer episodes.")
-
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
