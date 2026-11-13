@@ -57,3 +57,6 @@ jobs:
       - name: Render Hollywood episodes
         if: github.event.action == 'hollywood_render'
         run: python hollywood_render.py render
+      - name: Report Hollywood workflow failure
+        if: failure() && (github.event.action == 'hollywood_analyze' || github.event.action == 'hollywood_render')
+        run: python hollywood_render.py fail
