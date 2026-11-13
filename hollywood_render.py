@@ -295,6 +295,10 @@ def render_episode(source, episode, episode_index, job_id, title, music_path, ou
     make_voiceover(narration, voice)
     voice_seconds = duration(voice)
     video_seconds = duration(video_only)
+    if not 360 <= video_seconds <= 540:
+        raise RuntimeError(
+            f"Episode {episode_index} rendered duration is {video_seconds:.0f}s; expected 360–540s."
+        )
     ratio = voice_seconds / video_seconds
     if ratio < 0.8 or ratio > 1.25:
         raise RuntimeError(
@@ -303,7 +307,7 @@ def render_episode(source, episode, episode_index, job_id, title, music_path, ou
         )
 
     captions = output_dir / f"ep{episode_index}.srt"
-    write_srt(narration, voice_seconds, captions)
+    write_srt(narration, video_seconds, captions)
     final_path = output_dir / f"ep{episode_index}_final.mp4"
     escaped_caption_path = str(captions.resolve()).replace("\\", "/").replace(":", "\\:")
     vf = f"subtitles={escaped_caption_path}"
