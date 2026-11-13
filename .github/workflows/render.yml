@@ -1,7 +1,7 @@
 name: Render Pool
 on:
   repository_dispatch:
-    types: [render_pool]
+    types: [render_pool, hollywood_analyze, hollywood_render]
   workflow_dispatch:
 jobs:
   render:
@@ -15,6 +15,8 @@ jobs:
       GEMINI_MODEL: gemini-3.5-flash
       RAPIDAPI_YT_KEY: ${{ secrets.RAPIDAPI_YT_KEY }}
       TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+      HOLLYWOOD_MUSIC_URL: ${{ vars.HOLLYWOOD_MUSIC_URL }}
+      PIPER_DATA_DIR: piper_voices
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -33,8 +35,23 @@ jobs:
       - name: Install castlineup (Remotion) dependencies
         working-directory: castlineup
         run: npm install
+      - name: Cache Piper voice model
+        if: github.event.action == 'hollywood_render'
+        uses: actions/cache@v4
+        with:
+          path: piper_voices
+          key: piper-en-us-lessac-medium-v1
       - name: Save incoming payload
+        if: github.event.action == 'render_pool'
         env:
           PAYLOAD: ${{ toJSON(github.event.client_payload) }}
         run: printf '%s' "$PAYLOAD" > decision.json
-      - run: python render.py
+      - name: Run existing render pool
+        if: github.event_name == 'workflow_dispatch' || github.event.action == 'render_pool'
+        run: python render.py
+      - name: Analyze Hollywood source
+        if: github.event.action == 'hollywood_analyze'
+        run: python hollywood_render.py analyze
+      - name: Render Hollywood episodes
+        if: github.event.action == 'hollywood_render'
+        run: python hollywood_render.py render
