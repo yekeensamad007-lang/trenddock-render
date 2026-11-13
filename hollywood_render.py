@@ -346,7 +346,11 @@ def render_episode(source, episode, episode_index, job_id, title, music_path, ou
 def render():
     payload = event_payload()
     job_id = payload["job_id"]
-    plan = payload["edit_plan"]
+    plan = payload.get("edit_plan")
+    if not plan:
+        plan_response = requests.get(payload["edit_plan_url"], timeout=60)
+        plan_response.raise_for_status()
+        plan = plan_response.json()
     title = payload.get("title") or "Movie Explainer"
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     configure_cloudinary()
