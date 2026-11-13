@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import wave
 from pathlib import Path
 
 import cloudinary
@@ -231,6 +232,11 @@ def make_voiceover(text, wav_path):
             check=True, timeout=900,
         )
 
+    from piper import PiperVoice
+
+    voice = PiperVoice.load(
+        str(VOICE_DIR / f"{VOICE}.onnx"), download_dir=VOICE_DIR,
+    )
     sentences = split_sentences(text)
     if not sentences:
         raise RuntimeError("The judge returned no narration for an episode.")
@@ -240,14 +246,10 @@ def make_voiceover(text, wav_path):
     parts = []
     for index, sentence in enumerate(sentences):
         part = wav_path.with_name(f"{wav_path.stem}_part{index:03}.wav")
-        subprocess.run(
-            [
-                sys.executable, "-m", "piper", "-m", VOICE,
-                "--data-dir", str(VOICE_DIR), "-f", str(part), "--", sentence,
-            ],
-            check=True, timeout=180,
-        )
-        seconds = duration(part)
+        with wave.open(str(part), "wb") as part_wave:
+            voice.synthesize_wav(sentence, part_wave)
+        with wave.open(str(part), "rb") as part_wave:
+            seconds = part_wave.getnframes() / part_wave.getframerate()
         spans.append({"start": elapsed, "end": elapsed + seconds, "text": sentence})
         elapsed += seconds
         parts.append(part)
