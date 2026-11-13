@@ -299,6 +299,33 @@ def write_srt(spans, time_scale, total_seconds, path):
 
 def render_episode(source, episode, episode_index, job_id, title, music_path, output_dir):
     segments = episode.get("segments") or []
+    if not segments:
+        raise RuntimeError(f"Episode {episode_index} has no selected scene segments.")
+    source_seconds = duration(source)
+
+    # Validate the judge's timeline before spending time transcoding. The output
+    # is a sequence of source ranges, so its duration is their sum regardless of
+    # the order in which the judge places them.
+    selected_duration = 0.0
+    for segment_index, segment in enumerate(segments, start=1):
+        try:
+            start, end = float(segment["start"]), float(segment["end"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Episode {episode_index} segment {segment_index} has invalid timestamps."
+            ) from exc
+        if start < 0 or end <= start or end > source_seconds + 0.05:
+            raise RuntimeError(
+                f"Episode {episode_index} segment {segment_index} must fit within the "
+                f"{source_seconds:.3f}s source and have 0 <= start < end."
+            )
+        selected_duration += end - start
+    if not 360 <= selected_duration <= 540:
+        raise RuntimeError(
+            f"Episode {episode_index} selects {selected_duration:.0f}s of footage; "
+            "the selected scene ranges must total 360–540s."
+        )
+
     narration = " ".join((segment.get("narration") or "").strip() for segment in segments).strip()
     words = len(re.findall(r"\w+", narration))
     if not 850 <= words <= 1500:
@@ -309,7 +336,8 @@ def render_episode(source, episode, episode_index, job_id, title, music_path, ou
         part = output_dir / f"ep{episode_index}_part{i}.mp4"
         vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
         run_ffmpeg([
-            "ffmpeg", "-y", "-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-i", str(source),
+            "ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", str(source),
+            "-t", f"{end - start:.3f}",
             "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
             "-pix_fmt", "yuv420p", "-r", "30", str(part),
         ], f"scene segment {i}")
