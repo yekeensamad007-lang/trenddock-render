@@ -44,18 +44,6 @@ def event_payload():
         return json.load(handle).get("client_payload") or {}
 
 
-def upload_video(path, public_id):
-    configure_cloudinary()
-    result = cloudinary.uploader.upload_large(
-        str(path), resource_type="video", folder="trenddock/hollywood/source",
-        public_id=public_id, chunk_size=20_000_000, overwrite=True,
-    )
-    url = result.get("secure_url")
-    if not url:
-        raise RuntimeError("Cloudinary did not return a source video URL.")
-    return url
-
-
 def upload_raw(path, folder, public_id):
     configure_cloudinary()
     result = cloudinary.uploader.upload(
@@ -195,7 +183,6 @@ def analyze():
     if not video.is_file():
         raise RuntimeError(f"Source artifact is missing: {video}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    source_url = upload_video(video, f"source_{job_id}")
     video_duration = duration(video)
     cues = []
     subtitle_source = None
@@ -239,7 +226,8 @@ def analyze():
     callback("hollywood_analysis_complete", {
         "job_id": job_id,
         "analysis_url": analysis_url,
-        "source_url": source_url,
+        "source_run_id": payload["source_run_id"],
+        "source_artifact_name": payload["source_artifact_name"],
         "subtitles_url": subtitles_url,
         "transcript_url": transcript_url,
         "subtitles_available": bool(subtitles_url or transcript_url),
@@ -433,11 +421,12 @@ def render():
     if not music_url:
         raise RuntimeError("The render event must include music_url or HOLLYWOOD_MUSIC_URL must be configured.")
     plan_url = upload_json(plan, f"edit_plan_{job_id}")
+    source = Path("hollywood_transfer") / job_id / "source.mp4"
+    if not source.is_file():
+        raise RuntimeError(f"Private source artifact is missing: {source}")
     with tempfile.TemporaryDirectory(prefix="td-hollywood-render-") as temp:
         temp = Path(temp)
-        source = temp / "source.mp4"
         music = temp / "music.bin"
-        download(payload["source_url"], source)
         download(music_url, music)
         piper_voice = load_piper_voice()
         outputs = []
