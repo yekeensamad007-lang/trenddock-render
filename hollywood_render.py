@@ -111,12 +111,12 @@ def duration(video_path):
 
 def transcript_text_to_cues(text, total_seconds):
     """Use Agent Reach transcript text without running Whisper when timed VTT is unavailable."""
-    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\\s+", text) if part.strip()]
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
     if not sentences and text.strip():
         sentences = [text.strip()]
     if not sentences:
         return []
-    weights = [max(1, len(re.findall(r"\\w+", sentence))) for sentence in sentences]
+    weights = [max(1, len(re.findall(r"\w+", sentence))) for sentence in sentences]
     total_weight = sum(weights)
     elapsed = 0.0
     cues = []
@@ -305,7 +305,7 @@ def render_episode(source, episode, episode_index, job_id, title, music_path, ou
     captions = output_dir / f"ep{episode_index}.srt"
     write_srt(narration, voice_seconds, captions)
     final_path = output_dir / f"ep{episode_index}_final.mp4"
-    escaped_caption_path = str(captions.resolve()).replace("\\\\", "/").replace(":", "\\\\:")
+    escaped_caption_path = str(captions.resolve()).replace("\\", "/").replace(":", "\\:")
     vf = f"subtitles={escaped_caption_path}"
     music_gain = float(os.environ.get("HOLLYWOOD_MUSIC_GAIN", "0.10"))
     run_ffmpeg([
