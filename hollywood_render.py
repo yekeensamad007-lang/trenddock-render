@@ -391,9 +391,11 @@ def render():
     title = payload.get("title") or "Movie Explainer"
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     configure_cloudinary()
-    music_url = os.environ.get("HOLLYWOOD_MUSIC_URL", "").strip()
+    # The private controller selects/stages Freesound audio and sends only the
+    # Cloudinary URL. Keep the Actions variable as a compatibility fallback.
+    music_url = str(payload.get("music_url") or os.environ.get("HOLLYWOOD_MUSIC_URL", "")).strip()
     if not music_url:
-        raise RuntimeError("Set the HOLLYWOOD_MUSIC_URL Actions variable to the selected music bed.")
+        raise RuntimeError("The render event must include music_url or HOLLYWOOD_MUSIC_URL must be configured.")
     with tempfile.TemporaryDirectory(prefix="td-hollywood-render-") as temp:
         temp = Path(temp)
         source = temp / "source.mp4"

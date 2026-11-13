@@ -46,6 +46,7 @@ Send `hollywood_render` with:
   "job_id": "stable-job-id",
   "source_url": "https://res.cloudinary.com/.../source.mp4",
   "edit_plan_url": "https://res.cloudinary.com/.../edit-plan.json",
+  "music_url": "https://res.cloudinary.com/.../music.mp3",
   "title": "Movie title"
 }
 ```
@@ -90,6 +91,9 @@ The `trenddock-render` GitHub Actions environment requires these secrets:
 - `CLOUDINARY_API_SECRET`
 - `CALLBACK_TOKEN`, with access to dispatch events to `trenddock`
 
-Set the `HOLLYWOOD_MUSIC_URL` Actions variable to the selected music-bed URL.
-The workflow uses the Cloudinary cloud name configured in `render.yml` and a
-local Piper voice model on the Actions runner.
+The private controller selects a CC0 Freesound track and stages its MP3 preview
+in Cloudinary. It sends the staged `music_url` to this workflow; the Freesound
+API key stays in the private repository. `HOLLYWOOD_MUSIC_URL` remains an
+optional fallback for manual render events. The workflow uses the Cloudinary
+cloud name configured in `render.yml` and a local Piper voice model on the
+Actions runner.
