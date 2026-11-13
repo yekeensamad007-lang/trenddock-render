@@ -8,15 +8,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CLOUDINARY_CLOUD_NAME: dnzxeped5
-      CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
-      CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
-      CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: gemini-3.5-flash
-      RAPIDAPI_YT_KEY: ${{ secrets.RAPIDAPI_YT_KEY }}
-      TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-      HOLLYWOOD_MUSIC_URL: ${{ vars.HOLLYWOOD_MUSIC_URL }}
-      PIPER_DATA_DIR: piper_voices
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -50,13 +41,32 @@ jobs:
         run: printf '%s' "$PAYLOAD" > decision.json
       - name: Run existing render pool
         if: github.event_name == 'workflow_dispatch' || github.event.action == 'render_pool'
+        env:
+          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-3.5-flash
+          RAPIDAPI_YT_KEY: ${{ secrets.RAPIDAPI_YT_KEY }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         run: python render.py
       - name: Analyze Hollywood source
         if: github.event.action == 'hollywood_analyze'
+        env:
+          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+          CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
         run: python hollywood_render.py analyze
       - name: Render Hollywood episodes
         if: github.event.action == 'hollywood_render'
+        env:
+          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+          CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
+          HOLLYWOOD_MUSIC_URL: ${{ vars.HOLLYWOOD_MUSIC_URL }}
+          PIPER_DATA_DIR: piper_voices
         run: python hollywood_render.py render
       - name: Report Hollywood workflow failure
         if: failure() && (github.event.action == 'hollywood_analyze' || github.event.action == 'hollywood_render')
+        env:
+          CALLBACK_TOKEN: ${{ secrets.CALLBACK_TOKEN }}
         run: python hollywood_render.py fail
