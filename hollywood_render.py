@@ -109,24 +109,6 @@ def duration(video_path):
     return float(result.stdout.strip())
 
 
-def transcript_text_to_cues(text, total_seconds):
-    """Use Agent Reach transcript text without running Whisper when timed VTT is unavailable."""
-    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
-    if not sentences and text.strip():
-        sentences = [text.strip()]
-    if not sentences:
-        return []
-    weights = [max(1, len(re.findall(r"\w+", sentence))) for sentence in sentences]
-    total_weight = sum(weights)
-    elapsed = 0.0
-    cues = []
-    for sentence, weight in zip(sentences, weights):
-        start = elapsed
-        elapsed += total_seconds * weight / total_weight
-        cues.append({"start": start, "end": elapsed, "text": sentence})
-    return cues
-
-
 def transcribe(video_path):
     import whisper
 
@@ -192,6 +174,7 @@ def analyze():
         video_duration = duration(video)
         cues = []
         subtitle_source = None
+        agent_reach_transcript = None
         if payload.get("subtitles_url"):
             subtitle_path = Path(temp) / "source.vtt"
             try:
@@ -205,14 +188,13 @@ def analyze():
             transcript_path = Path(temp) / "agent_reach_transcript.txt"
             try:
                 download(payload["transcript_url"], transcript_path)
-                transcript_text = transcript_path.read_text(encoding="utf-8", errors="replace")
-                cues = transcript_text_to_cues(transcript_text, video_duration)
-                if cues:
-                    subtitle_source = "agent_reach"
+                agent_reach_transcript = transcript_path.read_text(
+                    encoding="utf-8", errors="replace",
+                ).strip() or None
             except Exception as exc:
                 print(f"Agent Reach transcript could not be read: {exc}")
         if not cues:
-            print("No usable YouTube subtitles or Agent Reach transcript; running local Whisper.")
+            print("No usable timed YouTube subtitles; running local Whisper for cue timings.")
             cues = transcribe(video)
             subtitle_source = "whisper"
         if not cues:
@@ -223,6 +205,7 @@ def analyze():
             "duration_seconds": video_duration,
             "subtitle_source": subtitle_source,
             "transcript": cues,
+            "agent_reach_transcript": agent_reach_transcript,
             "scene_cuts": scene_cuts(video),
         }
         analysis_url = upload_json(analysis, f"analysis_{job_id}")

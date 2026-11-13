@@ -21,10 +21,11 @@ Send a GitHub `repository_dispatch` event with type `hollywood_analyze` and this
 ```
 
 `subtitles_url` and `transcript_url` are optional. The worker uses timed
-YouTube VTT subtitles first. If those are missing or unusable, it uses the
-Agent Reach transcript when supplied; otherwise it runs local Whisper. The
-analysis manifest contains the transcript cues, duration, subtitle source, and
-detected scene-cut timestamps.
+YouTube VTT subtitles when they are usable. Otherwise, it runs local Whisper to
+produce accurate cue timings. If an Agent Reach transcript was supplied, its
+plain text is included as a reference in the analysis manifest; it is not given
+fabricated timestamps. The manifest contains the timed transcript cues,
+duration, subtitle source, and detected scene-cut timestamps.
 
 On success, the renderer dispatches `hollywood_analysis_complete` to the private
 repository:
