@@ -224,7 +224,7 @@ def split_sentences(text):
     return [part.strip() for part in re.split(r"(?<=[.!?])\s+", text.strip()) if part.strip()]
 
 
-def make_voiceover(text, wav_path):
+def load_piper_voice():
     VOICE_DIR.mkdir(parents=True, exist_ok=True)
     if not (VOICE_DIR / f"{VOICE}.onnx").exists():
         subprocess.run(
@@ -234,9 +234,12 @@ def make_voiceover(text, wav_path):
 
     from piper import PiperVoice
 
-    voice = PiperVoice.load(
+    return PiperVoice.load(
         str(VOICE_DIR / f"{VOICE}.onnx"), download_dir=VOICE_DIR,
     )
+
+
+def make_voiceover(text, wav_path, voice):
     sentences = split_sentences(text)
     if not sentences:
         raise RuntimeError("The judge returned no narration for an episode.")
@@ -282,7 +285,9 @@ def write_srt(spans, time_scale, total_seconds, path):
     Path(path).write_text("\n".join(rows), encoding="utf-8")
 
 
-def render_episode(source, episode, episode_index, job_id, title, music_path, output_dir):
+def render_episode(
+    source, episode, episode_index, job_id, title, music_path, output_dir, piper_voice,
+):
     segments = episode.get("segments") or []
     if not segments:
         raise RuntimeError(f"Episode {episode_index} has no selected scene segments.")
@@ -339,9 +344,9 @@ def render_episode(source, episode, episode_index, job_id, title, music_path, ou
         "-c", "copy", str(video_only),
     ], "join selected scenes")
 
-    voice = output_dir / f"ep{episode_index}_voice.wav"
-    voice_spans = make_voiceover(narration, voice)
-    voice_seconds = duration(voice)
+    voice_path = output_dir / f"ep{episode_index}_voice.wav"
+    voice_spans = make_voiceover(narration, voice_path, piper_voice)
+    voice_seconds = duration(voice_path)
     video_seconds = duration(video_only)
     if not 360 <= video_seconds <= 540:
         raise RuntimeError(
@@ -361,7 +366,7 @@ def render_episode(source, episode, episode_index, job_id, title, music_path, ou
     vf = f"subtitles={escaped_caption_path}"
     music_gain = float(os.environ.get("HOLLYWOOD_MUSIC_GAIN", "0.10"))
     run_ffmpeg([
-        "ffmpeg", "-y", "-i", str(video_only), "-i", str(voice), "-stream_loop", "-1",
+        "ffmpeg", "-y", "-i", str(video_only), "-i", str(voice_path), "-stream_loop", "-1",
         "-i", str(music_path), "-filter_complex",
         f"[1:a]atempo={ratio:.5f}[voice];[2:a]volume={music_gain}[music];"
         "[voice][music]amix=inputs=2:duration=first:dropout_transition=2[a]",
@@ -380,6 +385,9 @@ def render():
         plan_response = requests.get(payload["edit_plan_url"], timeout=60)
         plan_response.raise_for_status()
         plan = plan_response.json()
+    episodes = plan.get("episodes") or []
+    if not 2 <= len(episodes) <= 3:
+        raise RuntimeError("Edit plan must contain 2 or 3 episodes.")
     title = payload.get("title") or "Movie Explainer"
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     configure_cloudinary()
@@ -392,13 +400,11 @@ def render():
         music = temp / "music.bin"
         download(payload["source_url"], source)
         download(music_url, music)
+        piper_voice = load_piper_voice()
         outputs = []
-        episodes = plan.get("episodes") or []
-        if not 2 <= len(episodes) <= 3:
-            raise RuntimeError("Edit plan must contain 2 or 3 episodes.")
         for index, episode in enumerate(episodes, start=1):
             final_path, seconds = render_episode(
-                source, episode, index, job_id, title, music, temp,
+                source, episode, index, job_id, title, music, temp, piper_voice,
             )
             result = cloudinary.uploader.upload_large(
                 str(final_path), resource_type="video", folder="trenddock/hollywood/episodes",
