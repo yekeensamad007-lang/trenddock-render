@@ -21,6 +21,8 @@ PRIVATE_REPO = "yekeensamad007-lang/trenddock"
 OUTPUT_DIR = Path("processed/hollywood")
 VOICE = os.environ.get("PIPER_VOICE", "en_US-lessac-medium")
 VOICE_DIR = Path(os.environ.get("PIPER_DATA_DIR", "piper_voices"))
+MAX_CLOUDINARY_VIDEO_BYTES = 100 * 1024 * 1024
+TARGET_CLOUDINARY_VIDEO_BYTES = 90 * 1024 * 1024
 
 
 def required(name):
@@ -383,17 +385,28 @@ def render_episode(
     write_srt(voice_spans, video_seconds / voice_seconds, video_seconds, captions)
     final_path = output_dir / f"ep{episode_index}_final.mp4"
     escaped_caption_path = str(captions.resolve()).replace("\\", "/").replace(":", "\\:")
-    vf = f"subtitles={escaped_caption_path}"
+    vf = f"scale=720:1280:flags=lanczos,subtitles={escaped_caption_path}"
     music_gain = float(os.environ.get("HOLLYWOOD_MUSIC_GAIN", "0.10"))
+    audio_bitrate = 128_000
+    video_bitrate = max(
+        600_000,
+        int((TARGET_CLOUDINARY_VIDEO_BYTES * 8 / video_seconds) * 0.88 - audio_bitrate),
+    )
     run_ffmpeg([
         "ffmpeg", "-y", "-i", str(video_only), "-i", str(voice_path), "-stream_loop", "-1",
         "-i", str(music_path), "-filter_complex",
         f"[1:a]atempo={ratio:.5f}[voice];[2:a]volume={music_gain}[music];"
         "[voice][music]amix=inputs=2:duration=first:dropout_transition=2[a]",
         "-vf", vf, "-map", "0:v:0", "-map", "[a]", "-t", f"{video_seconds:.3f}",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-        "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p", str(final_path),
+        "-c:v", "libx264", "-preset", "veryfast", "-b:v", str(video_bitrate),
+        "-maxrate", str(video_bitrate), "-bufsize", str(video_bitrate * 2),
+        "-c:a", "aac", "-b:a", str(audio_bitrate), "-pix_fmt", "yuv420p", str(final_path),
     ], "narration, music, and caption mix")
+    if final_path.stat().st_size >= MAX_CLOUDINARY_VIDEO_BYTES:
+        raise RuntimeError(
+            f"Rendered episode is {final_path.stat().st_size} bytes, over Cloudinary's "
+            f"{MAX_CLOUDINARY_VIDEO_BYTES}-byte per-file limit."
+        )
     return final_path, video_seconds
 
 
