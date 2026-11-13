@@ -109,6 +109,24 @@ def duration(video_path):
     return float(result.stdout.strip())
 
 
+def transcript_text_to_cues(text, total_seconds):
+    """Use Agent Reach transcript text without running Whisper when timed VTT is unavailable."""
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\\s+", text) if part.strip()]
+    if not sentences and text.strip():
+        sentences = [text.strip()]
+    if not sentences:
+        return []
+    weights = [max(1, len(re.findall(r"\\w+", sentence))) for sentence in sentences]
+    total_weight = sum(weights)
+    elapsed = 0.0
+    cues = []
+    for sentence, weight in zip(sentences, weights):
+        start = elapsed
+        elapsed += total_seconds * weight / total_weight
+        cues.append({"start": start, "end": elapsed, "text": sentence})
+    return cues
+
+
 def transcribe(video_path):
     import whisper
 
@@ -167,8 +185,18 @@ def analyze():
                     subtitle_source = "youtube"
             except Exception as exc:
                 print(f"Timestamped YouTube subtitles could not be read: {exc}")
+        if not cues and payload.get("transcript_url"):
+            transcript_path = Path(temp) / "agent_reach_transcript.txt"
+            try:
+                download(payload["transcript_url"], transcript_path)
+                transcript_text = transcript_path.read_text(encoding="utf-8", errors="replace")
+                cues = transcript_text_to_cues(transcript_text, video_duration)
+                if cues:
+                    subtitle_source = "agent_reach"
+            except Exception as exc:
+                print(f"Agent Reach transcript could not be read: {exc}")
         if not cues:
-            print("No usable YouTube subtitle track; running local Whisper.")
+            print("No usable YouTube subtitles or Agent Reach transcript; running local Whisper.")
             cues = transcribe(video)
             subtitle_source = "whisper"
         if not cues:
@@ -277,7 +305,8 @@ def render_episode(source, episode, episode_index, job_id, title, music_path, ou
     captions = output_dir / f"ep{episode_index}.srt"
     write_srt(narration, voice_seconds, captions)
     final_path = output_dir / f"ep{episode_index}_final.mp4"
-    vf = f"subtitles={str(captions.resolve()).replace(':', r'\\:')}"
+    escaped_caption_path = str(captions.resolve()).replace("\\\\", "/").replace(":", "\\\\:")
+    vf = f"subtitles={escaped_caption_path}"
     music_gain = float(os.environ.get("HOLLYWOOD_MUSIC_GAIN", "0.10"))
     run_ffmpeg([
         "ffmpeg", "-y", "-i", str(video_only), "-i", str(voice), "-stream_loop", "-1",
