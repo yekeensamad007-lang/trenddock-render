@@ -166,6 +166,22 @@ def callback(event_type, payload):
         raise RuntimeError(f"Private callback failed: {response.status_code} {response.text[:400]}")
 
 
+def report_failure():
+    payload = event_payload()
+    if not payload.get("job_id"):
+        raise RuntimeError("Failed renderer event has no job_id.")
+    with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as handle:
+        stage = json.load(handle).get("action", "renderer")
+    callback(
+        "hollywood_job_failed",
+        {
+            "job_id": payload["job_id"],
+            "stage": stage,
+            "error": "Renderer workflow failed; inspect its GitHub Actions run logs.",
+        },
+    )
+
+
 def analyze():
     payload = event_payload()
     job_id = payload["job_id"]
@@ -399,5 +415,7 @@ if __name__ == "__main__":
         analyze()
     elif mode == "render":
         render()
+    elif mode == "fail":
+        report_failure()
     else:
-        raise SystemExit("Usage: python hollywood_render.py [analyze|render]")
+        raise SystemExit("Usage: python hollywood_render.py [analyze|render|fail]")
