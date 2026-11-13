@@ -1,99 +1,66 @@
 # Hollywood renderer contract
 
-This repository handles the media-heavy analysis and render stages. It downloads
-source media from Cloudinary, writes analysis manifests and finished episodes to
-Cloudinary, and sends job events back to the private `trenddock` repository.
-Supabase records and posting metadata stay in the private repository.
+This repository runs the media-heavy analysis and rendering stages. It downloads
+the source bundle from a private `trenddock` Actions artifact, stores media and
+manifests in Cloudinary, and sends job events back to the private repository.
+Supabase records and posting metadata stay in private `trenddock`.
 
 ## Start analysis
 
-Send a GitHub `repository_dispatch` event with type `hollywood_analyze` and this
-`client_payload`:
-
-```json
-{
-  "job_id": "stable-job-id",
-  "source_url": "https://res.cloudinary.com/.../source.mp4",
-  "subtitles_url": "https://res.cloudinary.com/.../source.vtt",
-  "transcript_url": "https://res.cloudinary.com/.../transcript.txt",
-  "title": "Movie title"
-}
-```
-
-`subtitles_url` and `transcript_url` are optional. The worker uses timed
-YouTube VTT subtitles when they are usable. Otherwise, it runs local Whisper to
-produce accurate cue timings. If an Agent Reach transcript was supplied, its
-plain text is included as a reference in the analysis manifest; it is not given
-fabricated timestamps. The manifest contains the timed transcript cues,
-duration, subtitle source, and detected scene-cut timestamps.
-
-On success, the renderer dispatches `hollywood_analysis_complete` to the private
-repository:
-
-```json
-{
-  "job_id": "stable-job-id",
-  "analysis_url": "https://res.cloudinary.com/.../analysis.json"
-}
-```
-
-## Start rendering
-
-Send `hollywood_render` with:
-
-```json
-{
-  "job_id": "stable-job-id",
-  "source_url": "https://res.cloudinary.com/.../source.mp4",
-  "edit_plan_url": "https://res.cloudinary.com/.../edit-plan.json",
-  "music_url": "https://res.cloudinary.com/.../music.mp3",
-  "title": "Movie title"
-}
-```
-
-The plan JSON contains 2–3 episodes. Each episode has a title and an ordered
-`segments` array. Every segment has source-video `start` and `end` times in
-seconds and the narration for that segment. Segment durations must add up to
-6–9 minutes per episode, and timestamps must fit within the source. Narration
-must contain 850–1,500 words per episode. The renderer crops to 9:16, removes
-source audio, creates voiceover and synchronized captions, mixes the configured
-music bed, and uploads each MP4 to Cloudinary.
-
-On success, it dispatches `hollywood_render_complete`:
+The private repository dispatches `hollywood_analyze` with this payload:
 
 ```json
 {
   "job_id": "stable-job-id",
   "title": "Movie title",
-  "outputs": [
-    {
-      "episode": 1,
-      "rank": 5,
-      "title": "Movie title — Part 1",
-      "caption": "Movie title explained — Part 1",
-      "duration_seconds": 420,
-      "cloudinary_url": "https://res.cloudinary.com/.../episode.mp4",
-      "thumbnail_url": "https://res.cloudinary.com/.../episode.jpg"
-    }
-  ]
+  "duration_seconds": 5400,
+  "source_run_id": "github-actions-run-id",
+  "source_artifact_name": "hollywood-source-job-id"
 }
 ```
 
-The private workflow stores those Cloudinary URLs and posting fields in
-Supabase. The renderer also dispatches `hollywood_job_failed` with `job_id`,
-`stage`, and `error` when an analysis or render workflow fails.
+The referenced private artifact is retained for one day and contains
+`source.mp4`, plus optional `source.vtt` and `transcript.txt`. The renderer
+downloads it with `CALLBACK_TOKEN`, stages the source and optional text assets
+in Cloudinary, and uses timed VTT subtitles when available. Otherwise it runs
+local Whisper to produce cue timings. The analysis manifest contains the timed
+transcript cues, duration, subtitle source, and detected scene-cut timestamps.
+
+On success, the renderer dispatches `hollywood_analysis_complete` to private
+`trenddock` with `job_id`, `analysis_url`, `source_url`, optional subtitle
+and transcript URLs, and `subtitles_available`.
+
+## Start rendering
+
+The private Judge sends `hollywood_render` with:
+
+```json
+{
+  "job_id": "stable-job-id",
+  "source_url": "https://res.cloudinary.com/.../source.mp4",
+  "title": "Movie title",
+  "source_run_id": "github-actions-run-id",
+  "plan_artifact_name": "hollywood-plan-job-id",
+  "music_url": "https://cdn.freesound.org/..."
+}
+```
+
+The renderer downloads the private edit-plan artifact with `CALLBACK_TOKEN`, then stages the plan and Freesound preview in Cloudinary. Each episode is cut to 9:16, source audio is removed, Piper narration and timed
+captions are added, and the music bed is mixed in. The renderer uploads each
+episode and calls back with the output URLs and the Cloudinary edit-plan URL.
+
+On failure, the renderer dispatches `hollywood_job_failed` with `job_id`,
+`stage`, and a concise error summary.
 
 ## Renderer configuration
 
-The `trenddock-render` GitHub Actions environment requires these secrets:
+The `trenddock-render` GitHub Actions repository requires these secrets:
 
 - `CLOUDINARY_API_KEY`
 - `CLOUDINARY_API_SECRET`
-- `CALLBACK_TOKEN`, with access to dispatch events to `trenddock`
+- `CALLBACK_TOKEN`, with access to dispatch events to private `trenddock` and
+  read its Actions artifacts (`Actions: read`).
 
-The private controller selects a CC0 Freesound track and stages its MP3 preview
-in Cloudinary. It sends the staged `music_url` to this workflow; the Freesound
-API key stays in the private repository. `HOLLYWOOD_MUSIC_URL` remains an
-optional fallback for manual render events. The workflow uses the Cloudinary
-cloud name configured in `render.yml` and a local Piper voice model on the
-Actions runner.
+The Cloudinary cloud name is `dnzxeped5`. `HOLLYWOOD_MUSIC_URL` remains an
+optional fallback for manual render events. The Freesound API key stays in the
+private repository.
