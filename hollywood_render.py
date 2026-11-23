@@ -23,6 +23,10 @@ VOICE = os.environ.get("PIPER_VOICE", "en_US-lessac-medium")
 VOICE_DIR = Path(os.environ.get("PIPER_DATA_DIR", "piper_voices"))
 MAX_CLOUDINARY_VIDEO_BYTES = 100 * 1024 * 1024
 TARGET_CLOUDINARY_VIDEO_BYTES = 90 * 1024 * 1024
+MIN_EPISODE_SECONDS = 180
+MAX_EPISODE_SECONDS = 600
+MIN_NARRATION_WPM = 90
+MAX_NARRATION_WPM = 180
 
 
 def required(name):
@@ -319,6 +323,8 @@ def render_episode(
     # is a sequence of source ranges, so its duration is their sum regardless of
     # the order in which the judge places them.
     selected_duration = 0.0
+    previous_start = -1.0
+    previous_end = -1.0
     for segment_index, segment in enumerate(segments, start=1):
         try:
             start, end = float(segment["start"]), float(segment["end"])
@@ -331,17 +337,26 @@ def render_episode(
                 f"Episode {episode_index} segment {segment_index} must fit within the "
                 f"{source_seconds:.3f}s source and have 0 <= start < end."
             )
+        if start < previous_start:
+            raise RuntimeError(f"Episode {episode_index} segments are not in source-story order.")
+        if start < previous_end:
+            raise RuntimeError(f"Episode {episode_index} repeats overlapping source footage.")
+        previous_start, previous_end = start, end
         selected_duration += end - start
-    if not 360 <= selected_duration <= 540:
+    if not MIN_EPISODE_SECONDS <= selected_duration <= MAX_EPISODE_SECONDS:
         raise RuntimeError(
             f"Episode {episode_index} selects {selected_duration:.0f}s of footage; "
-            "the selected scene ranges must total 360–540s."
+            f"story-driven safety range is {MIN_EPISODE_SECONDS}–{MAX_EPISODE_SECONDS}s."
         )
 
     narration = " ".join((segment.get("narration") or "").strip() for segment in segments).strip()
     words = len(re.findall(r"\w+", narration))
-    if not 850 <= words <= 1500:
-        raise RuntimeError(f"Episode {episode_index} narration is {words} words; judge must return 850–1500.")
+    narration_wpm = words / (selected_duration / 60) if selected_duration else 0
+    if not MIN_NARRATION_WPM <= narration_wpm <= MAX_NARRATION_WPM:
+        raise RuntimeError(
+            f"Episode {episode_index} narration pace is {narration_wpm:.0f} words/min; "
+            f"expected {MIN_NARRATION_WPM}–{MAX_NARRATION_WPM} for the selected runtime."
+        )
     video_parts = []
     for i, segment in enumerate(segments):
         start, end = float(segment["start"]), float(segment["end"])
@@ -370,9 +385,10 @@ def render_episode(
     voice_spans = make_voiceover(narration, voice_path, piper_voice)
     voice_seconds = duration(voice_path)
     video_seconds = duration(video_only)
-    if not 360 <= video_seconds <= 540:
+    if not MIN_EPISODE_SECONDS <= video_seconds <= MAX_EPISODE_SECONDS:
         raise RuntimeError(
-            f"Episode {episode_index} rendered duration is {video_seconds:.0f}s; expected 360–540s."
+            f"Episode {episode_index} rendered duration is {video_seconds:.0f}s; "
+            f"story-driven safety range is {MIN_EPISODE_SECONDS}–{MAX_EPISODE_SECONDS}s."
         )
     ratio = voice_seconds / video_seconds
     if ratio < 0.8 or ratio > 1.25:
@@ -392,16 +408,25 @@ def render_episode(
         600_000,
         int((TARGET_CLOUDINARY_VIDEO_BYTES * 8 / video_seconds) * 0.88 - audio_bitrate),
     )
-    run_ffmpeg([
-        "ffmpeg", "-y", "-i", str(video_only), "-i", str(voice_path), "-stream_loop", "-1",
-        "-i", str(music_path), "-filter_complex",
+    audio_filter = (
         f"[1:a]atempo={ratio:.5f}[voice];[2:a]volume={music_gain}[music];"
-        "[voice][music]amix=inputs=2:duration=first:dropout_transition=2[a]",
+        "[voice][music]amix=inputs=2:duration=first:dropout_transition=2[a]"
+        if music_path
+        else f"[1:a]atempo={ratio:.5f}[a]"
+    )
+    command = [
+        "ffmpeg", "-y", "-i", str(video_only), "-i", str(voice_path),
+    ]
+    if music_path:
+        command.extend(["-stream_loop", "-1", "-i", str(music_path)])
+    command.extend([
+        "-filter_complex", audio_filter,
         "-vf", vf, "-map", "0:v:0", "-map", "[a]", "-t", f"{video_seconds:.3f}",
         "-c:v", "libx264", "-preset", "veryfast", "-b:v", str(video_bitrate),
         "-maxrate", str(video_bitrate), "-bufsize", str(video_bitrate * 2),
         "-c:a", "aac", "-b:a", str(audio_bitrate), "-pix_fmt", "yuv420p", str(final_path),
-    ], "narration, music, and caption mix")
+    ])
+    run_ffmpeg(command, "narration, music, and caption mix" if music_path else "narration and caption render")
     if final_path.stat().st_size >= MAX_CLOUDINARY_VIDEO_BYTES:
         raise RuntimeError(
             f"Rendered episode is {final_path.stat().st_size} bytes, over Cloudinary's "
@@ -431,16 +456,22 @@ def render():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     configure_cloudinary()
     music_url = str(payload.get("music_url") or os.environ.get("HOLLYWOOD_MUSIC_URL", "")).strip()
-    if not music_url:
-        raise RuntimeError("The render event must include music_url or HOLLYWOOD_MUSIC_URL must be configured.")
     plan_url = upload_json(plan, f"edit_plan_{job_id}")
     source = Path("hollywood_transfer") / job_id / "source.mp4"
     if not source.is_file():
         raise RuntimeError(f"Private source artifact is missing: {source}")
     with tempfile.TemporaryDirectory(prefix="td-hollywood-render-") as temp:
         temp = Path(temp)
-        music = temp / "music.bin"
-        download(music_url, music)
+        music = None
+        if music_url:
+            music_path = temp / "music.bin"
+            try:
+                download(music_url, music_path)
+                music = music_path
+            except Exception as exc:
+                print(f"Licensed music preview could not be downloaded; rendering narration-only: {exc}")
+        else:
+            print("No licensed background music was supplied; rendering with narration only.")
         piper_voice = load_piper_voice()
         outputs = []
         for index, episode in enumerate(episodes, start=1):
