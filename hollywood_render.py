@@ -23,9 +23,8 @@ VOICE = os.environ.get("PIPER_VOICE", "en_US-lessac-medium")
 VOICE_DIR = Path(os.environ.get("PIPER_DATA_DIR", "piper_voices"))
 MAX_CLOUDINARY_VIDEO_BYTES = 100 * 1024 * 1024
 TARGET_CLOUDINARY_VIDEO_BYTES = 90 * 1024 * 1024
-MIN_EPISODE_SECONDS = 180
+MIN_EPISODE_SECONDS = 120
 MAX_EPISODE_SECONDS = 600
-MIN_NARRATION_WPM = 90
 MAX_NARRATION_WPM = 180
 
 
@@ -352,19 +351,30 @@ def render_episode(
     narration = " ".join((segment.get("narration") or "").strip() for segment in segments).strip()
     words = len(re.findall(r"\w+", narration))
     narration_wpm = words / (selected_duration / 60) if selected_duration else 0
-    if not MIN_NARRATION_WPM <= narration_wpm <= MAX_NARRATION_WPM:
+    if narration_wpm > MAX_NARRATION_WPM:
         raise RuntimeError(
             f"Episode {episode_index} narration pace is {narration_wpm:.0f} words/min; "
-            f"expected {MIN_NARRATION_WPM}–{MAX_NARRATION_WPM} for the selected runtime."
+            f"it exceeds the {MAX_NARRATION_WPM} words/min safety limit."
         )
+    voice_path = output_dir / f"ep{episode_index}_voice.wav"
+    voice_spans = make_voiceover(narration, voice_path, piper_voice)
+    voice_seconds = duration(voice_path)
+    target_video_duration = min(selected_duration, voice_seconds)
+    if not MIN_EPISODE_SECONDS <= target_video_duration <= MAX_EPISODE_SECONDS:
+        raise RuntimeError(
+            f"Episode {episode_index} narration implies a {target_video_duration:.0f}s runtime; "
+            f"story-driven safety range is {MIN_EPISODE_SECONDS}–{MAX_EPISODE_SECONDS}s."
+        )
+    trim_scale = target_video_duration / selected_duration
     video_parts = []
     for i, segment in enumerate(segments):
         start, end = float(segment["start"]), float(segment["end"])
+        clip_seconds = (end - start) * trim_scale
         part = output_dir / f"ep{episode_index}_part{i}.mp4"
         vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
         run_ffmpeg([
             "ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", str(source),
-            "-t", f"{end - start:.3f}",
+            "-t", f"{clip_seconds:.3f}",
             "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
             "-pix_fmt", "yuv420p", "-r", "30", str(part),
         ], f"scene segment {i}")
@@ -381,9 +391,6 @@ def render_episode(
         "-c", "copy", str(video_only),
     ], "join selected scenes")
 
-    voice_path = output_dir / f"ep{episode_index}_voice.wav"
-    voice_spans = make_voiceover(narration, voice_path, piper_voice)
-    voice_seconds = duration(voice_path)
     video_seconds = duration(video_only)
     if not MIN_EPISODE_SECONDS <= video_seconds <= MAX_EPISODE_SECONDS:
         raise RuntimeError(

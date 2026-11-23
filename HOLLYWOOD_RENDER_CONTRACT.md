@@ -49,9 +49,10 @@ The private Judge sends `hollywood_render` with:
 ```
 
 The renderer downloads both private artifacts with `CALLBACK_TOKEN`. It
-assembles the story in two or three chronological arcs and lets each episode run
-for the duration its story needs, within 3–10 minute safety bounds. The renderer
-cuts each arc to 9:16, removes source audio, adds Piper narration and timed
+assembles the story in two or three coherent arcs and lets each episode run
+for the duration its story needs, within 2–10 minute safety bounds. Piper
+narration determines the final runtime; the renderer trims the selected scene
+montage proportionally to fit it. It cuts each arc to 9:16, removes source audio, adds timed
 captions, and mixes in CC0 music when available. If no eligible music was found,
 it renders narration-only so music search cannot block video creation. It uploads
 only finished episodes and the plan manifest to Cloudinary, then calls back with
